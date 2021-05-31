@@ -15,6 +15,7 @@ export interface TraverseObject {
   ExportDefaultDeclaration?: (path: NodePath<t.ExportDefaultDeclaration>) => void,
   CallExpression?: (path: NodePath<t.CallExpression>) => void,
   Identifier?: (path: NodePath<t.Identifier>) => void,
+  ObjectProperty?: (path: NodePath<t.ObjectProperty>) => void,
 }
 
 export interface TranspilerInterface {

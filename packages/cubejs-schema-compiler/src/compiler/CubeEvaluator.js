@@ -175,19 +175,24 @@ export class CubeEvaluator extends CubeSymbols {
     if (!type) {
       throw new Error(`Type can't be undefined for '${path}'`);
     }
+
     if (!path) {
       throw new Error('Path can\'t be undefined');
     }
+
     const cubeAndName = Array.isArray(path) ? path : path.split('.');
     if (!this.evaluatedCubes[cubeAndName[0]]) {
       throw new UserError(`Cube '${cubeAndName[0]}' not found for path '${path}'`);
     }
+
     if (!this.evaluatedCubes[cubeAndName[0]][type]) {
       throw new UserError(`${type} not defined for path '${path}'`);
     }
+
     if (!this.evaluatedCubes[cubeAndName[0]][type][cubeAndName[1]]) {
       throw new UserError(`'${cubeAndName[1]}' not found for path '${path}'`);
     }
+
     return this.evaluatedCubes[cubeAndName[0]][type][cubeAndName[1]];
   }
 
@@ -229,17 +234,42 @@ export class CubeEvaluator extends CubeSymbols {
       dimension: this.evaluateReferences(cube, aggregation.timeDimensionReference),
       granularity: aggregation.granularity
     }] : [];
+
+    let dimensions = [];
+
+    if (aggregation.dimensionReferences) {
+      dimensions = this.evaluateReferences(cube, aggregation.dimensionReferences);
+    }
+
+    if (aggregation.dimensions) {
+      dimensions = dimensions.concat(
+        this.evaluateReferences(cube, aggregation.dimensions)
+      );
+    }
+
+    if (aggregation.segmentReferences) {
+      dimensions = dimensions.concat(
+        this.evaluateReferences(cube, aggregation.segmentReferences)
+      );
+    }
+
+    if (aggregation.segments) {
+      dimensions = dimensions.concat(
+        this.evaluateReferences(cube, aggregation.segments)
+      );
+    }
+
     return {
-      dimensions:
-        (aggregation.dimensionReferences && this.evaluateReferences(cube, aggregation.dimensionReferences) || [])
-          .concat(
-            aggregation.segmentReferences && this.evaluateReferences(cube, aggregation.segmentReferences) || []
-          ),
+      dimensions,
       measures:
-        aggregation.measureReferences && this.evaluateReferences(cube, aggregation.measureReferences) || [],
+        (aggregation.measureReferences && this.evaluateReferences(cube, aggregation.measureReferences))
+        || (aggregation.measures && this.evaluateReferences(cube, aggregation.measures))
+        || [],
       timeDimensions,
       rollups:
-        aggregation.rollupReferences && this.evaluateReferences(cube, aggregation.rollupReferences) || [],
+        (aggregation.rollupReferences && this.evaluateReferences(cube, aggregation.rollupReferences))
+        || (aggregation.rollups && this.evaluateReferences(cube, aggregation.rollups))
+        || [],
     };
   }
 }
