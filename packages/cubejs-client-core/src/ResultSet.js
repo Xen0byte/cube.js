@@ -1,33 +1,19 @@
 import dayjs from 'dayjs';
-import quarterOfYear from 'dayjs/plugin/quarterOfYear';
-
-import en from 'dayjs/locale/en';
 import {
   groupBy, pipe, fromPairs, uniq, filter, map, dropLast, equals, reduce, minBy, maxBy, clone, mergeDeepLeft,
   pluck, mergeAll, flatten,
 } from 'ramda';
 
 import { aliasSeries } from './utils';
-
-dayjs.extend(quarterOfYear);
-
-// When granularity is week, weekStart Value must be 1. However, since the client can change it globally (https://day.js.org/docs/en/i18n/changing-locale)
-// So the function below has been added.
-const internalDayjs = (...args) => dayjs(...args).locale({ ...en, weekStart: 1 });
-
-export const TIME_SERIES = {
-  day: (range) => range.by('d').map(d => d.format('YYYY-MM-DDT00:00:00.000')),
-  month: (range) => range.snapTo('month').by('M').map(d => d.format('YYYY-MM-01T00:00:00.000')),
-  year: (range) => range.snapTo('year').by('y').map(d => d.format('YYYY-01-01T00:00:00.000')),
-  hour: (range) => range.by('h').map(d => d.format('YYYY-MM-DDTHH:00:00.000')),
-  minute: (range) => range.by('m').map(d => d.format('YYYY-MM-DDTHH:mm:00.000')),
-  second: (range) => range.by('s').map(d => d.format('YYYY-MM-DDTHH:mm:ss.000')),
-  week: (range) => range.snapTo('week').by('w').map(d => d.startOf('week').format('YYYY-MM-DDT00:00:00.000')),
-  quarter: (range) => range.snapTo('quarter').by('quarter').map(d => d.startOf('quarter').format('YYYY-MM-DDT00:00:00.000')),
-};
-
-const DateRegex = /^\d\d\d\d-\d\d-\d\d$/;
-const LocalDateRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d{3}Z?$/;
+import {
+  DateRegex,
+  dayRange,
+  internalDayjs,
+  isPredefinedGranularity,
+  LocalDateRegex,
+  TIME_SERIES,
+  timeSeriesFromCustomInterval
+} from './time';
 
 const groupByToPairs = (keyFn) => {
   const acc = new Map();
@@ -55,25 +41,6 @@ const unnest = (arr) => {
 
   return res;
 };
-
-export const dayRange = (from, to) => ({
-  by: (value) => {
-    const results = [];
-
-    let start = internalDayjs(from);
-    const end = internalDayjs(to);
-
-    while (start.isBefore(end) || start.isSame(end)) {
-      results.push(start);
-      start = start.add(1, value);
-    }
-
-    return results;
-  },
-  snapTo: (value) => dayRange(internalDayjs(from).startOf(value), internalDayjs(to).endOf(value)),
-  start: internalDayjs(from),
-  end: internalDayjs(to),
-});
 
 export const QUERY_TYPE = {
   REGULAR_QUERY: 'regularQuery',
@@ -127,6 +94,7 @@ class ResultSet {
       throw new Error('Data blending drillDown query is not currently supported');
     }
 
+    const { query } = this.loadResponses[0];
     const { xValues = [], yValues = [] } = drillDownLocator;
     const normalizedPivotConfig = this.normalizePivotConfig(pivotConfig);
 
@@ -161,13 +129,25 @@ class ResultSet {
 
         if (granularity !== undefined) {
           const range = dayRange(value, value).snapTo(granularity);
+          const originalTimeDimension = query.timeDimensions.find((td) => td.dimension);
+
+          let dateRange = [
+            range.start,
+            range.end
+          ];
+
+          if (originalTimeDimension?.dateRange) {
+            const [originalStart, originalEnd] = originalTimeDimension.dateRange;
+
+            dateRange = [
+              dayjs(originalStart) > range.start ? dayjs(originalStart) : range.start,
+              dayjs(originalEnd) < range.end ? dayjs(originalEnd) : range.end,
+            ];
+          }
 
           timeDimensions.push({
             dimension: [cubeName, dimension].join('.'),
-            dateRange: [
-              range.start,
-              range.end
-            ].map((dt) => dt.format('YYYY-MM-DDTHH:mm:ss.SSS')),
+            dateRange: dateRange.map((dt) => dt.format('YYYY-MM-DDTHH:mm:ss.SSS')),
           });
         } else if (value == null) {
           filters.push({
@@ -183,7 +163,6 @@ class ResultSet {
         }
       });
 
-    const { query } = this.loadResponses[0];
     if (
       timeDimensions.length === 0 &&
       query.timeDimensions.length > 0 &&
@@ -309,7 +288,7 @@ class ResultSet {
     return ResultSet.getNormalizedPivotConfig(this.loadResponse.pivotQuery, pivotConfig);
   }
 
-  timeSeries(timeDimension, resultIndex) {
+  timeSeries(timeDimension, resultIndex, annotations) {
     if (!timeDimension.granularity) {
       return null;
     }
@@ -340,12 +319,18 @@ class ResultSet {
     const [start, end] = dateRange;
     const range = dayRange(start, end);
 
-    if (!TIME_SERIES[timeDimension.granularity]) {
-      throw new Error(`Unsupported time granularity: ${timeDimension.granularity}`);
+    if (isPredefinedGranularity(timeDimension.granularity)) {
+      return TIME_SERIES[timeDimension.granularity](
+        padToDay ? range.snapTo('d') : range
+      );
     }
 
-    return TIME_SERIES[timeDimension.granularity](
-      padToDay ? range.snapTo('d') : range
+    if (!annotations[`${timeDimension.dimension}.${timeDimension.granularity}`]) {
+      throw new Error(`Granularity "${timeDimension.granularity}" not found in time dimension "${timeDimension.dimension}"`);
+    }
+
+    return timeSeriesFromCustomInterval(
+      start, end, annotations[`${timeDimension.dimension}.${timeDimension.granularity}`].granularity
     );
   }
 
@@ -356,7 +341,7 @@ class ResultSet {
     const pivotImpl = (resultIndex = 0) => {
       let groupByXAxis = groupByToPairs(({ xValues }) => this.axisValuesString(xValues));
 
-      const measureValue = (row, measure) => row[measure] || 0;
+      const measureValue = (row, measure) => row[measure] || pivotConfig.fillWithValue || 0;
 
       if (
         pivotConfig.fillMissingDates &&
@@ -369,7 +354,10 @@ class ResultSet {
         ))
       ) {
         const series = this.loadResponses.map(
-          (loadResponse) => this.timeSeries(loadResponse.query.timeDimensions[0], resultIndex)
+          (loadResponse) => this.timeSeries(
+            loadResponse.query.timeDimensions[0],
+            resultIndex, loadResponse.annotation.timeDimensions
+          )
         );
 
         if (series[0]) {
@@ -687,6 +675,10 @@ class ResultSet {
 
   pivotQuery() {
     return this.loadResponse.pivotQuery || null;
+  }
+
+  totalRows() {
+    return this.loadResponses[0].total;
   }
 
   rawData() {

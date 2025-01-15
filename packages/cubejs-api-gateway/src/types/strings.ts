@@ -75,7 +75,9 @@ type FilterOperator =
  'notInDateRange' |
  'onTheDate' |
  'beforeDate' |
+ 'beforeOrOnDate' |
  'afterDate' |
+ 'afterOrOnDate' |
  'measureFilter';
 
 /**
@@ -102,7 +104,6 @@ type QueryOrderType =
  * ApiScopes data type.
  */
 type ApiScopes =
-  'liveliness' |
   'graphql' |
   'meta' |
   'data' |

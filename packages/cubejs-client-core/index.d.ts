@@ -66,7 +66,7 @@ declare module '@cubejs-client/core' {
     public request(method: string, params: any): ITransportResponse<ResultSet>;
   }
 
-  export type CubeJSApiOptions = {
+  export type CubeApiOptions = {
     /**
      * URL of your Cube.js Backend. By default, in the development environment it is `http://localhost:4000/cubejs-api/v1`
      */
@@ -80,6 +80,7 @@ declare module '@cubejs-client/core' {
     credentials?: 'omit' | 'same-origin' | 'include';
     parseDateMeasures?: boolean;
     resType?: 'default' | 'compact';
+    castNumerics?: boolean;
   };
 
   export type LoadMethodOptions = {
@@ -96,9 +97,13 @@ declare module '@cubejs-client/core' {
      */
     subscribe?: boolean;
     /**
-     * A Cube.js API instance. If not provided will be taken from `CubeProvider`
+     * A Cube API instance. If not provided will be taken from `CubeProvider`
      */
-    cubejsApi?: CubejsApi;
+    cubeApi?: CubeApi;
+    /**
+     * If enabled, all members of the 'number' type will be automatically converted to numerical values on the client side
+     */
+    castNumerics?: boolean;
     /**
      * Function that receives `ProgressResult` on each `Continue wait` message.
      */
@@ -149,6 +154,9 @@ declare module '@cubejs-client/core' {
     sortedDimensions: string[];
     sortedTimeDimensions: [[string, string]];
     measureToLeafMeasures?: Record<string, LeafMeasure[]>;
+    ownedDimensions: string[];
+    ownedTimeDimensionsAsIs: [[string, string | null]];
+    ownedTimeDimensionsWithRollupGranularity: [[string, string]];
   };
 
   export type PreAggregationType = 'rollup' | 'rollupJoin' | 'rollupLambda' | 'originalSql';
@@ -244,9 +252,13 @@ declare module '@cubejs-client/core' {
      */
     y?: string[];
     /**
-     * If `true` missing dates on the time dimensions will be filled with `0` for all measures.Note: the `fillMissingDates` option set to `true` will override any **order** applied to the query
+     * If `true` missing dates on the time dimensions will be filled with fillWithValue or `0` by default for all measures.Note: the `fillMissingDates` option set to `true` will override any **order** applied to the query
      */
     fillMissingDates?: boolean | null;
+    /**
+     * Value to autofill all the missing date's measure.
+     */
+    fillWithValue?: string | number | null;
     /**
      * Give each series a prefix alias. Should have one entry for each query:measure. See [chartPivot](#result-set-chart-pivot)
      */
@@ -317,7 +329,7 @@ declare module '@cubejs-client/core' {
      * ```js
      * import { ResultSet } from '@cubejs-client/core';
      *
-     * const resultSet = await cubejsApi.load(query);
+     * const resultSet = await cubeApi.load(query);
      * // You can store the result somewhere
      * const tmp = resultSet.serialize();
      *
@@ -724,6 +736,11 @@ declare module '@cubejs-client/core' {
     query(): Query;
     rawData(): T[];
     annotation(): QueryAnnotations;
+
+    /**
+     * @return the total number of rows if the `total` option was set, when sending the query
+     */
+    totalRows(): number | null;
   }
 
   export type Filter = BinaryFilter | UnaryFilter | LogicalOrFilter | LogicalAndFilter;
@@ -770,9 +787,13 @@ declare module '@cubejs-client/core' {
     | 'inDateRange'
     | 'notInDateRange'
     | 'beforeDate'
-    | 'afterDate';
+    | 'beforeOrOnDate'
+    | 'afterDate'
+    | 'afterOrOnDate';
 
-  export type TimeDimensionGranularity = 'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
+  export type TimeDimensionPredefinedGranularity = 'second' | 'minute' | 'hour' | 'day' | 'week' | 'month' | 'quarter' | 'year';
+
+  export type TimeDimensionGranularity = TimeDimensionPredefinedGranularity | string;
 
   export type DateRange = string | [string, string];
 
@@ -821,7 +842,7 @@ declare module '@cubejs-client/core' {
 
   type QueryArrayRecordType<T extends DeeplyReadonly<Query[]>> =
     T extends readonly [infer First, ...infer Rest]
-    ? SingleQueryRecordType<First> | QueryArrayRecordType<Rest & DeeplyReadonly<Query[]>>
+    ? SingleQueryRecordType<DeeplyReadonly<First>> | QueryArrayRecordType<Rest & DeeplyReadonly<Query[]>>
     : never;
 
   // If we can't infer any members at all, then return any.
@@ -891,7 +912,12 @@ declare module '@cubejs-client/core' {
     name: string;
     title: string;
     shortTitle: string;
+    description?: string;
+    /**
+     * @deprecated use `public` instead
+     */
     isVisible?: boolean;
+    public?: boolean;
     meta?: any;
   };
 
@@ -900,7 +926,12 @@ declare module '@cubejs-client/core' {
     name: string;
     title: string;
     shortTitle: string;
+    description?: string;
+    /**
+     * @deprecated use `public` instead
+     */
     isVisible?: boolean;
+    public?: boolean;
     meta?: any;
   };
 
@@ -913,11 +944,25 @@ declare module '@cubejs-client/core' {
       measures: string[];
       dimensions: string[];
     };
+    format?: 'currency' | 'percent';
   };
 
-  export type TCubeDimension = BaseCubeMember & {
+  export type CubeTimeDimensionGranularity = {
+    name: string;
+    title: string;
+  }
+
+  export type BaseCubeDimension = BaseCubeMember & {
+    primaryKey?: boolean;
     suggestFilterValues: boolean;
-  };
+  }
+
+  export type CubeTimeDimension = BaseCubeDimension &
+    { type: 'time'; granularities?: CubeTimeDimensionGranularity[] };
+
+  export type TCubeDimension =
+    (BaseCubeDimension & { type: Exclude<BaseCubeDimension['type'], 'time'> }) |
+    CubeTimeDimension;
 
   export type TCubeSegment = Omit<BaseCubeMember, 'type'>;
 
@@ -930,6 +975,18 @@ declare module '@cubejs-client/core' {
     : never;
 
   export type CubeMember = TCubeMeasure | TCubeDimension | TCubeSegment;
+
+  export type TCubeFolder = {
+    name: string;
+    members: string[];
+  };
+
+  export type TCubeHierarchy = {
+    name: string;
+    title?: string;
+    levels: string[];
+    public?: boolean;
+  };
 
   /**
    * @deprecated use DryRunResponse
@@ -953,9 +1010,20 @@ declare module '@cubejs-client/core' {
   export type Cube = {
     name: string;
     title: string;
+    description?: string;
     measures: TCubeMeasure[];
     dimensions: TCubeDimension[];
     segments: TCubeSegment[];
+    folders: TCubeFolder[];
+    hierarchies: TCubeHierarchy[];
+    connectedComponent?: number;
+    type?: 'view' | 'cube';
+    /**
+     * @deprecated use `public` instead
+     */
+    isVisible?: boolean;
+    public?: boolean;
+    meta?: any;
   };
 
 
@@ -1037,11 +1105,11 @@ declare module '@cubejs-client/core' {
   }
 
   /**
-   * Main class for accessing Cube.js API
+   * Main class for accessing Cube API
    *
    * @order 2
    */
-  export class CubejsApi {
+  export class CubeApi {
     load<QueryType extends DeeplyReadonly<Query | Query[]>>(
       query: QueryType,
       options?: LoadMethodOptions,
@@ -1050,13 +1118,13 @@ declare module '@cubejs-client/core' {
      * Fetch data for the passed `query`.
      *
      * ```js
-     * import cubejs from '@cubejs-client/core';
+     * import cube from '@cubejs-client/core';
      * import Chart from 'chart.js';
      * import chartjsConfig from './toChartjsData';
      *
-     * const cubejsApi = cubejs('CUBEJS_TOKEN');
+     * const cubeApi = cube('CUBEJS_TOKEN');
      *
-     * const resultSet = await cubejsApi.load({
+     * const resultSet = await cubeApi.load({
      *  measures: ['Stories.count'],
      *  timeDimensions: [{
      *    dimension: 'Stories.time',
@@ -1068,7 +1136,7 @@ declare module '@cubejs-client/core' {
      * const context = document.getElementById('myChart');
      * new Chart(context, chartjsConfig(resultSet));
      * ```
-     * @param query - [Query object](query-format)
+     * @param query - [Query object](/product/apis-integrations/rest-api/query-format)
      */
     load<QueryType extends DeeplyReadonly<Query | Query[]>>(
       query: QueryType,
@@ -1084,11 +1152,11 @@ declare module '@cubejs-client/core' {
     ): Promise<ResultSet<QueryRecordType<QueryType>>>;
 
     /**
-     * Allows you to fetch data and receive updates over time. See [Real-Time Data Fetch](real-time-data-fetch)
+     * Allows you to fetch data and receive updates over time. See [Real-Time Data Fetch](/product/apis-integrations/rest-api/real-time-data-fetch)
      *
      * ```js
      * // Subscribe to a query's updates
-     * const subscription = await cubejsApi.subscribe(
+     * const subscription = await cubeApi.subscribe(
      *   {
      *     measures: ['Logs.count'],
      *     timeDimensions: [
@@ -1138,12 +1206,12 @@ declare module '@cubejs-client/core' {
   }
 
   /**
-   * Creates an instance of the `CubejsApi`. The API entry point.
+   * Creates an instance of the `CubeApi`. The API entry point.
    *
    * ```js
-   * import cubejs from '@cubejs-client/core';
-   * const cubejsApi = cubejs(
-   *   'CUBEJS-API-TOKEN',
+   * import cube from '@cubejs-client/core';
+   * const cubeApi = cube(
+   *   'CUBE-API-TOKEN',
    *   { apiUrl: 'http://localhost:4000/cubejs-api/v1' }
    * );
    * ```
@@ -1151,18 +1219,18 @@ declare module '@cubejs-client/core' {
    * You can also pass an async function or a promise that will resolve to the API token
    *
    * ```js
-   * import cubejs from '@cubejs-client/core';
-   * const cubejsApi = cubejs(
+   * import cube from '@cubejs-client/core';
+   * const cubeApi = cube(
    *   async () => await Auth.getJwtToken(),
    *   { apiUrl: 'http://localhost:4000/cubejs-api/v1' }
    * );
    * ```
    *
-   * @param apiToken - [API token](security) is used to authorize requests and determine SQL database you're accessing. In the development mode, Cube.js Backend will print the API token to the console on startup. In case of async function `authorization` is updated for `options.transport` on each request.
+   * @param apiToken - [API token](/product/auth) is used to authorize requests and determine SQL database you're accessing. In the development mode, Cube.js Backend will print the API token to the console on startup. In case of async function `authorization` is updated for `options.transport` on each request.
    * @order 1
    */
-  export default function cubejs(apiToken: string | (() => Promise<string>), options: CubeJSApiOptions): CubejsApi;
-  export default function cubejs(options: CubeJSApiOptions): CubejsApi;
+  export default function cube(apiToken: string | (() => Promise<string>), options: CubeApiOptions): CubeApi;
+  export default function cube(options: CubeApiOptions): CubeApi;
 
   /**
    * @hidden
@@ -1253,4 +1321,10 @@ declare module '@cubejs-client/core' {
     stage: string;
     timeElapsed: number;
   };
+
+  export function granularityFor(dateStr: string): string;
+
+  export function minGranularityForIntervals(i1: string, i2: string): string;
+
+  export function isPredefinedGranularity(granularity: TimeDimensionGranularity): boolean;
 }

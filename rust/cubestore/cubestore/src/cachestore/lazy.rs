@@ -1,17 +1,22 @@
-use crate::cachestore::cache_rocksstore::QueueAddResponse;
+use crate::cachestore::cache_eviction_manager::EvictionResult;
+use crate::cachestore::cache_rocksstore::{
+    CachestoreInfo, QueueAddPayload, QueueAddResponse, QueueAllItem, QueueGetResponse,
+    QueueListItem,
+};
 use crate::cachestore::queue_item::QueueRetrieveResponse;
 use crate::cachestore::{
-    CacheItem, CacheStore, QueueItem, QueueItemStatus, QueueKey, QueueResultResponse,
-    RocksCacheStore,
+    CacheItem, CacheStore, QueueCancelResponse, QueueItem, QueueItemStatus, QueueKey, QueueResult,
+    QueueResultResponse, RocksCacheStore,
 };
 use crate::config::ConfigObj;
-use crate::metastore::{IdRow, MetaStoreEvent, MetaStoreFs};
+use crate::metastore::{IdRow, MetaStoreEvent, MetaStoreFs, RocksPropertyRow};
 use crate::CubeError;
 use async_trait::async_trait;
 use log::trace;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::watch::{Receiver, Sender};
+use tokio::task::JoinHandle;
 
 pub enum LazyRocksCacheStoreState {
     FromRemote {
@@ -118,7 +123,7 @@ impl LazyRocksCacheStore {
         }
     }
 
-    pub async fn wait_upload_loop(&self) {
+    pub async fn spawn_processing_loops(self: Arc<Self>) -> Vec<JoinHandle<Result<(), CubeError>>> {
         if let Some(init_signal) = &self.init_signal {
             let _ = init_signal.clone().changed().await;
         }
@@ -128,13 +133,13 @@ impl LazyRocksCacheStore {
             if let LazyRocksCacheStoreState::Initialized { store } = &*guard {
                 store.clone()
             } else {
-                return ();
+                return vec![];
             }
         };
 
-        trace!("wait_upload_loop unblocked, Cache Store was initialized");
+        trace!("start_processing_loops unblocked, Cache Store was initialized");
 
-        store.wait_upload_loop().await
+        store.spawn_processing_loops()
     }
 
     pub async fn stop_processing_loops(&self) {
@@ -167,8 +172,8 @@ impl LazyRocksCacheStore {
 
 #[async_trait]
 impl CacheStore for LazyRocksCacheStore {
-    async fn cache_all(&self) -> Result<Vec<IdRow<CacheItem>>, CubeError> {
-        self.init().await?.cache_all().await
+    async fn cache_all(&self, limit: Option<usize>) -> Result<Vec<IdRow<CacheItem>>, CubeError> {
+        self.init().await?.cache_all(limit).await
     }
 
     async fn cache_set(
@@ -202,12 +207,23 @@ impl CacheStore for LazyRocksCacheStore {
         self.init().await?.cache_incr(path).await
     }
 
-    async fn queue_all(&self) -> Result<Vec<IdRow<QueueItem>>, CubeError> {
-        self.init().await?.queue_all().await
+    async fn queue_all(&self, limit: Option<usize>) -> Result<Vec<QueueAllItem>, CubeError> {
+        self.init().await?.queue_all(limit).await
     }
 
-    async fn queue_add(&self, item: QueueItem) -> Result<QueueAddResponse, CubeError> {
-        self.init().await?.queue_add(item).await
+    async fn queue_results_all(
+        &self,
+        limit: Option<usize>,
+    ) -> Result<Vec<IdRow<QueueResult>>, CubeError> {
+        self.init().await?.queue_results_all(limit).await
+    }
+
+    async fn queue_results_multi_delete(&self, ids: Vec<u64>) -> Result<(), CubeError> {
+        self.init().await?.queue_results_multi_delete(ids).await
+    }
+
+    async fn queue_add(&self, payload: QueueAddPayload) -> Result<QueueAddResponse, CubeError> {
+        self.init().await?.queue_add(payload).await
     }
 
     async fn queue_truncate(&self) -> Result<(), CubeError> {
@@ -231,18 +247,19 @@ impl CacheStore for LazyRocksCacheStore {
         prefix: String,
         status_filter: Option<QueueItemStatus>,
         priority_sort: bool,
-    ) -> Result<Vec<IdRow<QueueItem>>, CubeError> {
+        with_payload: bool,
+    ) -> Result<Vec<QueueListItem>, CubeError> {
         self.init()
             .await?
-            .queue_list(prefix, status_filter, priority_sort)
+            .queue_list(prefix, status_filter, priority_sort, with_payload)
             .await
     }
 
-    async fn queue_get_by_path(&self, path: String) -> Result<Option<IdRow<QueueItem>>, CubeError> {
-        self.init().await?.queue_get_by_path(path).await
+    async fn queue_get(&self, key: QueueKey) -> Result<Option<QueueGetResponse>, CubeError> {
+        self.init().await?.queue_get(key).await
     }
 
-    async fn queue_cancel(&self, key: QueueKey) -> Result<Option<IdRow<QueueItem>>, CubeError> {
+    async fn queue_cancel(&self, key: QueueKey) -> Result<Option<QueueCancelResponse>, CubeError> {
         self.init().await?.queue_cancel(key).await
     }
 
@@ -288,8 +305,24 @@ impl CacheStore for LazyRocksCacheStore {
         self.init().await?.compaction().await
     }
 
+    async fn info(&self) -> Result<CachestoreInfo, CubeError> {
+        self.init().await?.info().await
+    }
+
+    async fn eviction(&self) -> Result<EvictionResult, CubeError> {
+        self.init().await?.eviction().await
+    }
+
+    async fn persist(&self) -> Result<(), CubeError> {
+        self.init().await?.persist().await
+    }
+
     async fn healthcheck(&self) -> Result<(), CubeError> {
         self.init().await?.healthcheck().await
+    }
+
+    async fn rocksdb_properties(&self) -> Result<Vec<RocksPropertyRow>, CubeError> {
+        self.init().await?.rocksdb_properties().await
     }
 }
 

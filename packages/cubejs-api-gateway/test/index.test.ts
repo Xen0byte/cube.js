@@ -6,7 +6,8 @@ import express from 'express';
 import request from 'supertest';
 import jwt from 'jsonwebtoken';
 
-import { ApiGateway, ApiGatewayOptions, Query, Request } from '../src';
+import * as console from 'console';
+import { ApiGateway, ApiGatewayOptions, Query, QueryRequest, Request } from '../src';
 import { generateAuthToken } from './utils';
 import {
   preAggregationsResultFactory,
@@ -43,14 +44,14 @@ async function requestBothGetAndPost(app, { url, query, body }, assert) {
 }
 
 const API_SECRET = 'secret';
-function createApiGateway(
+async function createApiGateway(
   adapterApi: any = new AdapterApiMock(),
   dataSourceStorage: any = new DataSourceStorageMock(),
   options: Partial<ApiGatewayOptions> = {}
 ) {
   process.env.NODE_ENV = 'production';
 
-  const apiGateway = new ApiGateway(API_SECRET, compilerApi, () => adapterApi, logger, {
+  const apiGateway = new ApiGateway(API_SECRET, compilerApi, async () => adapterApi, logger, {
     standalone: true,
     dataSourceStorage,
     basePath: '/cubejs-api',
@@ -72,7 +73,7 @@ function createApiGateway(
 
 describe('API Gateway', () => {
   test('bad token', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get('/cubejs-api/v1/load?query={"measures":["Foo.bar"]}')
@@ -82,7 +83,7 @@ describe('API Gateway', () => {
   });
 
   test('bad token with schema', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get('/cubejs-api/v1/load?query={"measures":["Foo.bar"]}')
@@ -91,15 +92,42 @@ describe('API Gateway', () => {
     expect(res.body && res.body.error).toStrictEqual('Invalid token');
   });
 
+  test('query field is empty', async () => {
+    const { app } = await createApiGateway();
+
+    const res = await request(app)
+      .get('/cubejs-api/v1/load?query=')
+      .set('Authorization', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M')
+      .expect(400);
+
+    expect(res.body && res.body.error).toStrictEqual(
+      'Query param is required'
+    );
+  });
+
+  test('incorrect json for query field', async () => {
+    const { app } = await createApiGateway();
+
+    const res = await request(app)
+      .get('/cubejs-api/v1/load?query=NOT_A_JSON')
+      .set('Authorization', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M')
+      .expect(400);
+
+    expect(res.body && res.body.error).toContain(
+      // different JSON.parse errors between Node.js versions
+      'Unable to decode query param as JSON, error: Unexpected token'
+    );
+  });
+
   test('requires auth', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app).get('/cubejs-api/v1/load?query={"measures":["Foo.bar"]}').expect(403);
     expect(res.body && res.body.error).toStrictEqual('Authorization header isn\'t set');
   });
 
   test('passes correct token', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get('/cubejs-api/v1/load?query={}')
@@ -111,7 +139,7 @@ describe('API Gateway', () => {
   });
 
   test('passes correct token with auth schema', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get('/cubejs-api/v1/load?query={}')
@@ -124,7 +152,7 @@ describe('API Gateway', () => {
   });
 
   test('catch error requestContextMiddleware', async () => {
-    const { app } = createApiGateway(
+    const { app } = await createApiGateway(
       new AdapterApiMock(),
       new DataSourceStorageMock(),
       {
@@ -159,7 +187,7 @@ describe('API Gateway', () => {
       return query;
     });
 
-    const { app } = createApiGateway(
+    const { app } = await createApiGateway(
       new AdapterApiMock(),
       new DataSourceStorageMock(),
       {
@@ -199,7 +227,7 @@ describe('API Gateway', () => {
       return query;
     });
 
-    const { app } = createApiGateway(
+    const { app } = await createApiGateway(
       new AdapterApiMock(),
       new DataSourceStorageMock(),
       {
@@ -227,8 +255,56 @@ describe('API Gateway', () => {
     expect(queryRewrite.mock.calls.length).toEqual(1);
   });
 
+  test('query transform with checkAuth with return', async () => {
+    const queryRewrite = jest.fn(async (query: Query, context) => {
+      expect(context.securityContext).toEqual({
+        exp: 2475857705,
+        iat: 1611857705,
+        uid: 5
+      });
+
+      expect(context.authInfo).toEqual({
+        exp: 2475857705,
+        iat: 1611857705,
+        uid: 5
+      });
+
+      return query;
+    });
+
+    const { app } = await createApiGateway(
+      new AdapterApiMock(),
+      new DataSourceStorageMock(),
+      {
+        checkAuth: (req: Request, authorization) => {
+          if (authorization) {
+            return {
+              security_context: jwt.verify(authorization, API_SECRET),
+            };
+          }
+
+          return {};
+        },
+        queryRewrite
+      }
+    );
+
+    const res = await request(app)
+      .get(
+        '/cubejs-api/v1/load?query={"measures":["Foo.bar"],"filters":[{"dimension":"Foo.id","operator":"equals","values":[null]}]}'
+      )
+      // console.log(generateAuthToken({ uid: 5, }));
+      .set('Authorization', 'Authorization: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1aWQiOjUsImlhdCI6MTYxMTg1NzcwNSwiZXhwIjoyNDc1ODU3NzA1fQ.tTieqdIcxDLG8fHv8YWwfvg_rPVe1XpZKUvrCdzVn3g')
+      .expect(200);
+
+    console.log(res.body);
+    expect(res.body && res.body.data).toStrictEqual([{ 'Foo.bar': 42 }]);
+
+    expect(queryRewrite.mock.calls.length).toEqual(1);
+  });
+
   test('null filter values', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get(
@@ -240,8 +316,30 @@ describe('API Gateway', () => {
     expect(res.body && res.body.data).toStrictEqual([{ 'Foo.bar': 42 }]);
   });
 
+  test('custom granularities in annotation', async () => {
+    const { app } = await createApiGateway();
+
+    const res = await request(app)
+      .get(
+        '/cubejs-api/v1/load?query={"measures":["Foo.bar"],"timeDimensions":[{"dimension":"Foo.timeGranularities","granularity":"half_year_by_1st_april"}]}'
+      )
+      .set('Authorization', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M')
+      .expect(200);
+    console.log(res.body);
+    expect(res.body && res.body.data).toStrictEqual([{ 'Foo.bar': 42 }]);
+    expect(res.body.annotation.timeDimensions['Foo.timeGranularities.half_year_by_1st_april'])
+      .toStrictEqual({
+        granularity: {
+          name: 'half_year_by_1st_april',
+          title: 'Half Year By1 St April',
+          interval: '6 months',
+          offset: '3 months',
+        }
+      });
+  });
+
   test('dry-run', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const query = {
       measures: ['Foo.bar']
@@ -257,8 +355,8 @@ describe('API Gateway', () => {
             {
               measures: ['Foo.bar'],
               timezone: 'UTC',
-              order: [],
               filters: [],
+              rowLimit: 10000,
               limit: 10000,
               dimensions: [],
               timeDimensions: [],
@@ -269,8 +367,189 @@ describe('API Gateway', () => {
           pivotQuery: {
             measures: ['Foo.bar'],
             timezone: 'UTC',
-            order: [],
             filters: [],
+            rowLimit: 10000,
+            limit: 10000,
+            dimensions: [],
+            timeDimensions: [],
+            queryType: 'regularQuery'
+          },
+          transformedQueries: [null]
+        });
+      }
+    );
+  });
+
+  test('normalize filter number values', async () => {
+    const { app } = await createApiGateway();
+
+    const query = {
+      measures: ['Foo.bar'],
+      filters: [{
+        member: 'Foo.bar',
+        operator: 'gte',
+        values: [10.5]
+      }, {
+        member: 'Foo.bar',
+        operator: 'gte',
+        values: [0]
+      }, {
+        or: [{
+          member: 'Foo.bar',
+          operator: 'gte',
+          values: [10.5]
+        }, {
+          member: 'Foo.bar',
+          operator: 'gte',
+          values: [0]
+        }]
+      }]
+    };
+
+    return requestBothGetAndPost(
+      app,
+      { url: '/cubejs-api/v1/dry-run', query: { query: JSON.stringify(query) }, body: { query } },
+      (res) => {
+        expect(res.body.normalizedQueries).toStrictEqual([
+          {
+            measures: ['Foo.bar'],
+            timezone: 'UTC',
+            filters: [{
+              member: 'Foo.bar',
+              operator: 'gte',
+              values: ['10.5']
+            }, {
+              member: 'Foo.bar',
+              operator: 'gte',
+              values: ['0']
+            }, {
+              or: [{
+                member: 'Foo.bar',
+                operator: 'gte',
+                values: ['10.5']
+              }, {
+                member: 'Foo.bar',
+                operator: 'gte',
+                values: ['0']
+              }]
+            }],
+            rowLimit: 10000,
+            limit: 10000,
+            dimensions: [],
+            timeDimensions: [],
+            queryType: 'regularQuery'
+          }
+        ]);
+      }
+    );
+  });
+
+  test('normalize empty filters', async () => {
+    const { app } = await createApiGateway();
+
+    const res = await request(app)
+      .get(
+        '/cubejs-api/v1/load?query={"measures":["Foo.bar"],"filters":[{"member":"Foo.bar","operator":"equals","values":[]}]}'
+      )
+      .set('Authorization', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M')
+      .expect(400);
+    console.log(res.body);
+    expect(res.body.error).toMatch(/Values required for filter/);
+  });
+
+  test('normalize queryRewrite limit', async () => {
+    const { app } = await createApiGateway(
+      new AdapterApiMock(),
+      new DataSourceStorageMock(),
+      {
+        checkAuth: (req: Request, authorization) => {
+          if (authorization) {
+            jwt.verify(authorization, API_SECRET);
+            req.authInfo = authorization;
+          }
+        },
+        queryRewrite: async (query, _context) => {
+          query.limit = 2;
+          return query;
+        },
+      }
+    );
+
+    const query = {
+      measures: ['Foo.bar']
+    };
+
+    return requestBothGetAndPost(
+      app,
+      { url: '/cubejs-api/v1/dry-run', query: { query: JSON.stringify(query) }, body: { query } },
+      (res) => {
+        expect(res.body).toStrictEqual({
+          queryType: 'regularQuery',
+          normalizedQueries: [
+            {
+              measures: ['Foo.bar'],
+              timezone: 'UTC',
+              filters: [],
+              rowLimit: 2,
+              limit: 2,
+              dimensions: [],
+              timeDimensions: [],
+              queryType: 'regularQuery'
+            }
+          ],
+          queryOrder: [{ id: 'desc' }],
+          pivotQuery: {
+            measures: ['Foo.bar'],
+            timezone: 'UTC',
+            filters: [],
+            rowLimit: 2,
+            limit: 2,
+            dimensions: [],
+            timeDimensions: [],
+            queryType: 'regularQuery'
+          },
+          transformedQueries: [null]
+        });
+      }
+    );
+  });
+
+  test('normalize order', async () => {
+    const { app } = await createApiGateway();
+
+    const query = {
+      measures: ['Foo.bar'],
+      order: {
+        'Foo.bar': 'desc'
+      }
+    };
+
+    return requestBothGetAndPost(
+      app,
+      { url: '/cubejs-api/v1/dry-run', query: { query: JSON.stringify(query) }, body: { query } },
+      (res) => {
+        expect(res.body).toStrictEqual({
+          queryType: 'regularQuery',
+          normalizedQueries: [
+            {
+              measures: ['Foo.bar'],
+              order: [{ id: 'Foo.bar', desc: true }],
+              timezone: 'UTC',
+              filters: [],
+              rowLimit: 10000,
+              limit: 10000,
+              dimensions: [],
+              timeDimensions: [],
+              queryType: 'regularQuery'
+            }
+          ],
+          queryOrder: [{ id: 'desc' }],
+          pivotQuery: {
+            measures: ['Foo.bar'],
+            order: [{ id: 'Foo.bar', desc: true }],
+            timezone: 'UTC',
+            filters: [],
+            rowLimit: 10000,
             limit: 10000,
             dimensions: [],
             timeDimensions: [],
@@ -283,7 +562,7 @@ describe('API Gateway', () => {
   });
 
   test('date range padding', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get(
@@ -299,7 +578,7 @@ describe('API Gateway', () => {
   });
 
   test('order support object format', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const query = {
       measures: ['Foo.bar'],
@@ -316,7 +595,7 @@ describe('API Gateway', () => {
   });
 
   test('order support array of tuples', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const query = {
       measures: ['Foo.bar'],
@@ -337,7 +616,7 @@ describe('API Gateway', () => {
   });
 
   test('post http method for load route', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const query = {
       measures: ['Foo.bar'],
@@ -361,7 +640,7 @@ describe('API Gateway', () => {
   });
 
   test('meta endpoint to get schema information', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get('/cubejs-api/v1/meta')
@@ -369,19 +648,28 @@ describe('API Gateway', () => {
       .expect(200);
     expect(res.body).toHaveProperty('cubes');
     expect(res.body.cubes[0]?.name).toBe('Foo');
+    expect(res.body.cubes[0]?.description).toBe('cube from compilerApi mock');
     expect(res.body.cubes[0]?.hasOwnProperty('sql')).toBe(false);
+    expect(res.body.cubes[0]?.dimensions.find(dimension => dimension.name === 'Foo.id').description).toBe('id dimension from compilerApi mock');
+    expect(res.body.cubes[0]?.measures.find(measure => measure.name === 'Foo.bar').description).toBe('measure from compilerApi mock');
+    expect(res.body.cubes[0]?.segments.find(segment => segment.name === 'Foo.quux').description).toBe('segment from compilerApi mock');
   });
 
   test('meta endpoint extended to get schema information with additional data', async () => {
-    const { app } = createApiGateway();
+    const { app } = await createApiGateway();
 
     const res = await request(app)
       .get('/cubejs-api/v1/meta?extended')
       .set('Authorization', 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.t-IDcSemACt8x4iTMCda8Yhe3iZaWbvV5XKSTbuAn0M')
       .expect(200);
+
     expect(res.body).toHaveProperty('cubes');
     expect(res.body.cubes[0]?.name).toBe('Foo');
+    expect(res.body.cubes[0]?.description).toBe('cube from compilerApi mock');
     expect(res.body.cubes[0]?.hasOwnProperty('sql')).toBe(true);
+    expect(res.body.cubes[0]?.dimensions.find(dimension => dimension.name === 'Foo.id').description).toBe('id dimension from compilerApi mock');
+    expect(res.body.cubes[0]?.measures.find(measure => measure.name === 'Foo.bar').description).toBe('measure from compilerApi mock');
+    expect(res.body.cubes[0]?.segments.find(segment => segment.name === 'Foo.quux').description).toBe('segment from compilerApi mock');
   });
 
   describe('multi query support', () => {
@@ -400,7 +688,7 @@ describe('API Gateway', () => {
     });
 
     test('multi query with a flag', async () => {
-      const { app } = createApiGateway();
+      const { app } = await createApiGateway();
 
       const res = await request(app)
         .get(`/cubejs-api/v1/load?${searchParams.toString()}`)
@@ -418,7 +706,7 @@ describe('API Gateway', () => {
     });
 
     test('multi query without a flag', async () => {
-      const { app } = createApiGateway();
+      const { app } = await createApiGateway();
 
       searchParams.delete('queryType');
 
@@ -430,7 +718,7 @@ describe('API Gateway', () => {
     });
 
     test('regular query', async () => {
-      const { app } = createApiGateway();
+      const { app } = await createApiGateway();
 
       const query = JSON.stringify({
         measures: ['Foo.bar'],
@@ -458,6 +746,91 @@ describe('API Gateway', () => {
     });
   });
 
+  describe('sql api member expressions evaluations', () => {
+    test('throw error if expressions are not allowed', async () => {
+      const { apiGateway } = await createApiGateway();
+      const request: QueryRequest = {
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
+        res(message) {
+          const errorMessage = message as { error: string };
+          expect(errorMessage.error).toEqual('Error: Expressions are not allowed in this context');
+        },
+        query: {
+          measures: [
+            // eslint-disable-next-line no-template-curly-in-string
+            '{"cube_name":"sales","alias":"sum_sales_line_i","cube_params":["sales"],"expr":"SUM(${sales.line_items_price})","grouping_set":null}'
+          ],
+          dimensions: [
+            // eslint-disable-next-line no-template-curly-in-string
+            '{"cube_name":"sales","alias":"users_age","cube_params":["sales"],"expr":"${sales.users_age}","grouping_set":null}',
+            // eslint-disable-next-line no-template-curly-in-string
+            '{"cube_name":"sales","alias":"cast_sales_users","cube_params":["sales"],"expr":"CAST(${sales.users_first_name} AS TEXT)","grouping_set":null}'
+          ],
+          segments: [],
+          order: []
+        },
+        expressionParams: [],
+        exportAnnotatedSql: true,
+        memberExpressions: false,
+        disableExternalPreAggregations: true,
+        queryType: 'multi',
+        disableLimitEnforcing: true,
+        context: {
+          securityContext: {},
+          signedWithPlaygroundAuthSecret: false,
+          requestId: 'd592f44e-9c26-4187-aa09-e9d39ca19a88-span-1',
+          protocol: 'postgres',
+          apiType: 'sql',
+          appName: 'NULL'
+        },
+        apiType: 'sql'
+      };
+
+      await apiGateway.sql(request);
+    });
+
+    test('no error if expressions are allowed', async () => {
+      const { apiGateway } = await createApiGateway();
+      const request: QueryRequest = {
+        // eslint-disable-next-line @typescript-eslint/no-empty-function
+        res(message) {
+          expect(message.hasOwnProperty('sql')).toBe(true);
+        },
+        query: {
+          measures: [
+            // eslint-disable-next-line no-template-curly-in-string
+            '{"cube_name":"sales","alias":"sum_sales_line_i","cube_params":["sales"],"expr":"SUM(${sales.line_items_price})","grouping_set":null}'
+          ],
+          dimensions: [
+            // eslint-disable-next-line no-template-curly-in-string
+            '{"cube_name":"sales","alias":"users_age","cube_params":["sales"],"expr":"${sales.users_age}","grouping_set":null}',
+            // eslint-disable-next-line no-template-curly-in-string
+            '{"cube_name":"sales","alias":"cast_sales_users","cube_params":["sales"],"expr":"CAST(${sales.users_first_name} AS TEXT)","grouping_set":null}'
+          ],
+          segments: [],
+          order: []
+        },
+        expressionParams: [],
+        exportAnnotatedSql: true,
+        memberExpressions: true,
+        disableExternalPreAggregations: true,
+        queryType: 'multi',
+        disableLimitEnforcing: true,
+        context: {
+          securityContext: {},
+          signedWithPlaygroundAuthSecret: false,
+          requestId: 'd592f44e-9c26-4187-aa09-e9d39ca19a88-span-1',
+          protocol: 'postgres',
+          apiType: 'sql',
+          appName: 'NULL'
+        },
+        apiType: 'sql'
+      };
+
+      await apiGateway.sql(request);
+    });
+  });
+
   describe('/cubejs-system/v1', () => {
     const scheduledRefreshContextsFactory = () => ([
       { securityContext: { foo: 'bar' } },
@@ -466,9 +839,9 @@ describe('API Gateway', () => {
 
     const scheduledRefreshTimeZonesFactory = () => (['UTC', 'America/Los_Angeles']);
 
-    const appPrepareFactory = (scope?: string[]) => {
+    const appPrepareFactory = async (scope?: string[]) => {
       const playgroundAuthSecret = 'test12345';
-      const { app } = createApiGateway(
+      const { app } = await createApiGateway(
         new AdapterApiMock(),
         new DataSourceStorageMock(),
         {
@@ -476,7 +849,7 @@ describe('API Gateway', () => {
           playgroundAuthSecret,
           refreshScheduler: () => new RefreshSchedulerMock(),
           scheduledRefreshContexts: () => Promise.resolve(scheduledRefreshContextsFactory()),
-          scheduledRefreshTimeZones: scheduledRefreshTimeZonesFactory()
+          scheduledRefreshTimeZones: scheduledRefreshTimeZonesFactory
         }
       );
       const token = generateAuthToken({ uid: 5, scope }, {}, playgroundAuthSecret);
@@ -486,14 +859,14 @@ describe('API Gateway', () => {
     };
 
     const notAllowedTestFactory = ({ route, method = 'get' }) => async () => {
-      const { app } = appPrepareFactory();
+      const { app } = await appPrepareFactory();
       return request(app)[method](`/cubejs-system/v1/${route}`)
         .set('Content-type', 'application/json')
         .expect(403);
     };
 
     const notAllowedWithUserTokenTestFactory = ({ route, method = 'get' }) => async () => {
-      const { app, tokenUser } = appPrepareFactory();
+      const { app, tokenUser } = await appPrepareFactory();
 
       return request(app)[method](`/cubejs-system/v1/${route}`)
         .set('Content-type', 'application/json')
@@ -502,7 +875,7 @@ describe('API Gateway', () => {
     };
 
     const notExistsTestFactory = ({ route, method = 'get' }) => async () => {
-      const { app } = createApiGateway();
+      const { app } = await createApiGateway();
 
       return request(app)[method](`/cubejs-system/v1/${route}`)
         .set('Content-type', 'application/json')
@@ -510,7 +883,7 @@ describe('API Gateway', () => {
     };
 
     const successTestFactory = ({ route, method = 'get', successBody = {}, successResult, scope = [''] }) => async () => {
-      const { app, token } = appPrepareFactory(scope);
+      const { app, token } = await appPrepareFactory(scope);
 
       const req = request(app)[method](`/cubejs-system/v1/${route}`)
         .set('Content-type', 'application/json')
@@ -522,7 +895,9 @@ describe('API Gateway', () => {
       const res = await req;
       expect(res.body).toMatchObject(successResult);
     };
-       
+
+    /*
+     Test using this is commented out below
     const wrongPayloadsTestFactory = ({ route, wrongPayloads, scope }: {
       route: string,
       method: string,
@@ -535,7 +910,7 @@ describe('API Gateway', () => {
         body: {},
       }[]
     }) => async () => {
-      const { app, token } = appPrepareFactory(scope);
+      const { app, token } = await appPrepareFactory(scope);
 
       for (const payload of wrongPayloads) {
         const req = request(app).post(`/cubejs-system/v1/${route}`)
@@ -548,6 +923,7 @@ describe('API Gateway', () => {
         expect(res.body.error).toBe(payload.result.error);
       }
     };
+    */
 
     const testConfigs = [
       { route: 'context', successResult: { basePath: 'awesomepathtotest' } },
@@ -586,7 +962,7 @@ describe('API Gateway', () => {
 
   describe('healtchecks', () => {
     test('readyz (standalone)', async () => {
-      const { app, adapterApi } = createApiGateway();
+      const { app, adapterApi } = await createApiGateway();
 
       const res = await request(app)
         .get('/readyz')
@@ -601,7 +977,7 @@ describe('API Gateway', () => {
     });
 
     test('readyz (standalone)', async () => {
-      const { app, adapterApi } = createApiGateway();
+      const { app, adapterApi } = await createApiGateway();
 
       const res = await request(app)
         .get('/readyz')
@@ -626,7 +1002,7 @@ describe('API Gateway', () => {
         }
       }
 
-      const { app, adapterApi } = createApiGateway(new AdapterApiUnhealthyMock());
+      const { app, adapterApi } = await createApiGateway(new AdapterApiUnhealthyMock());
 
       const res = await request(app)
         .get('/readyz')
@@ -651,7 +1027,7 @@ describe('API Gateway', () => {
         }
       }
 
-      const { app, dataSourceStorage } = createApiGateway(new AdapterApiMock(), new DataSourceStorageUnhealthyMock());
+      const { app, dataSourceStorage } = await createApiGateway(new AdapterApiMock(), new DataSourceStorageUnhealthyMock());
 
       const res = await request(app)
         .get('/livez')

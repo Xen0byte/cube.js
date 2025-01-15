@@ -6,12 +6,19 @@ import { UserError } from './UserError';
 import { BaseMeasure, BaseQuery } from '../adapter';
 
 export class CubeToMetaTransformer {
+  /**
+   * @param {import('./CubeValidator').CubeValidator} cubeValidator
+   * @param {import('./CubeEvaluator').CubeEvaluator} cubeEvaluator
+   * @param {import('./ContextEvaluator').ContextEvaluator} contextEvaluator
+   * @param {import('./JoinGraph').JoinGraph} joinGraph
+   */
   constructor(cubeValidator, cubeEvaluator, contextEvaluator, joinGraph) {
     this.cubeValidator = cubeValidator;
     this.cubeSymbols = cubeEvaluator;
     this.cubeEvaluator = cubeEvaluator;
     this.contextEvaluator = contextEvaluator;
     this.joinGraph = joinGraph;
+    this.cubes = [];
   }
 
   compile(cubes, errorReporter) {
@@ -33,18 +40,23 @@ export class CubeToMetaTransformer {
   transform(cube) {
     const cubeTitle = cube.title || this.titleize(cube.name);
 
+    const isCubeVisible = this.isVisible(cube, true);
+
     return {
-      isVisible: this.isVisible(cube, true),
       config: {
         name: cube.name,
         type: cube.isView ? 'view' : 'cube',
         title: cubeTitle,
+        isVisible: isCubeVisible,
+        public: isCubeVisible,
         description: cube.description,
         connectedComponent: this.joinGraph.connectedComponents()[cube.name],
+        meta: cube.meta,
         measures: R.compose(
           R.map((nameToMetric) => ({
             ...this.measureConfig(cube.name, cubeTitle, nameToMetric),
-            isVisible: this.isVisible(nameToMetric[1], this.isVisible(cube, true))
+            isVisible: isCubeVisible ? this.isVisible(nameToMetric[1], true) : false,
+            public: isCubeVisible ? this.isVisible(nameToMetric[1], true) : false,
           })),
           R.toPairs
         )(cube.measures || {}),
@@ -56,10 +68,29 @@ export class CubeToMetaTransformer {
             description: nameToDimension[1].description,
             shortTitle: this.title(cubeTitle, nameToDimension, true),
             suggestFilterValues:
-              nameToDimension[1].suggestFilterValues == null ? true : nameToDimension[1].suggestFilterValues,
+              nameToDimension[1].suggestFilterValues == null
+                ? true
+                : nameToDimension[1].suggestFilterValues,
             format: nameToDimension[1].format,
             meta: nameToDimension[1].meta,
-            isVisible: this.isVisible(nameToDimension[1], this.isVisible(cube, !nameToDimension[1].primaryKey))
+            isVisible: isCubeVisible
+              ? this.isVisible(nameToDimension[1], !nameToDimension[1].primaryKey)
+              : false,
+            public: isCubeVisible
+              ? this.isVisible(nameToDimension[1], !nameToDimension[1].primaryKey)
+              : false,
+            primaryKey: !!nameToDimension[1].primaryKey,
+            aliasMember: nameToDimension[1].aliasMember,
+            granularities:
+              nameToDimension[1].granularities
+                ? R.compose(R.map((g) => ({
+                  name: g[0],
+                  title: this.title(cubeTitle, g, true),
+                  interval: g[1].interval,
+                  offset: g[1].offset,
+                  origin: g[1].origin,
+                })), R.toPairs)(nameToDimension[1].granularities)
+                : undefined,
           })),
           R.toPairs
         )(cube.dimensions || {}),
@@ -70,11 +101,21 @@ export class CubeToMetaTransformer {
             shortTitle: this.title(cubeTitle, nameToSegment, true),
             description: nameToSegment[1].description,
             meta: nameToSegment[1].meta,
-            isVisible: this.isVisible(nameToSegment[1], this.isVisible(cube, true))
+            isVisible: isCubeVisible ? this.isVisible(nameToSegment[1], true) : false,
+            public: isCubeVisible ? this.isVisible(nameToSegment[1], true) : false,
           })),
           R.toPairs
-        )(cube.segments || {})
-      }
+        )(cube.segments || {}),
+        hierarchies: (cube.evaluatedHierarchies || []).map((it) => ({
+          ...it,
+          public: it.public ?? true,
+          name: `${cube.name}.${it.name}`,
+        })),
+        folders: (cube.folders || []).map((it) => ({
+          name: it.name,
+          members: it.includes.map(member => `${cube.name}.${member.name}`),
+        })),
+      },
     };
   }
 
@@ -127,8 +168,7 @@ export class CubeToMetaTransformer {
       cubeName, drillMembers, { originalSorting: true }
     )) || [];
 
-    // TODO support type qualifiers on min and max
-    const type = BaseQuery.isCalculatedMeasureType(nameToMetric[1].type) ? nameToMetric[1].type : 'number';
+    const type = BaseQuery.toMemberDataType(nameToMetric[1].type);
 
     return {
       name,

@@ -1,14 +1,11 @@
 #![feature(test)]
-#![feature(backtrace)]
 #![feature(async_closure)]
-#![feature(drain_filter)]
 #![feature(box_patterns)]
-#![feature(slice_internals)]
 #![feature(vec_into_raw_parts)]
 #![feature(hash_set_entry)]
-#![feature(map_first_last)]
 #![feature(is_sorted)]
 #![feature(result_flattening)]
+#![feature(extract_if)]
 // #![feature(trace_macros)]
 
 // trace_macros!(true);
@@ -18,13 +15,13 @@ extern crate core;
 
 use crate::metastore::TableId;
 use crate::remotefs::queue::RemoteFsOpResult;
-use arrow::error::ArrowError;
 use cubehll::HllError;
 use cubezetasketch::ZetaError;
+use datafusion::arrow::error::ArrowError;
 use datafusion::cube_ext::catch_unwind::PanicError;
+use datafusion::parquet::errors::ParquetError;
 use flexbuffers::{DeserializationError, ReaderError};
 use log::SetLoggerError;
-use parquet::errors::ParquetError;
 use serde_derive::{Deserialize, Serialize};
 use sqlparser::parser::ParserError;
 use std::any::Any;
@@ -50,6 +47,7 @@ pub mod mysql;
 pub mod queryplanner;
 pub mod remotefs;
 pub mod scheduler;
+pub mod shared;
 pub mod sql;
 pub mod store;
 pub mod streaming;
@@ -75,6 +73,7 @@ pub enum CubeErrorCauseType {
     User,
     Internal,
     CorruptData,
+    WrongConnection,
     Panic,
 }
 
@@ -126,6 +125,14 @@ impl CubeError {
         }
     }
 
+    pub fn wrong_connection(message: String) -> CubeError {
+        CubeError {
+            message,
+            backtrace: String::new(),
+            cause: CubeErrorCauseType::WrongConnection,
+        }
+    }
+
     pub fn panic(message: String) -> CubeError {
         CubeError {
             message,
@@ -137,6 +144,13 @@ impl CubeError {
     pub fn is_corrupt_data(&self) -> bool {
         match self.cause {
             CubeErrorCauseType::CorruptData => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_wrong_connection(&self) -> bool {
+        match self.cause {
+            CubeErrorCauseType::WrongConnection => true,
             _ => false,
         }
     }
@@ -183,8 +197,8 @@ impl From<flexbuffers::DeserializationError> for CubeError {
     }
 }
 
-impl From<rocksdb::Error> for CubeError {
-    fn from(v: rocksdb::Error) -> Self {
+impl From<cuberockstore::rocksdb::Error> for CubeError {
+    fn from(v: cuberockstore::rocksdb::Error) -> Self {
         CubeError::from_error(v.into_string())
     }
 }
@@ -241,8 +255,12 @@ impl From<std::time::SystemTimeError> for CubeError {
 }
 
 impl From<Elapsed> for CubeError {
-    fn from(v: Elapsed) -> Self {
-        CubeError::from_error(v)
+    fn from(_: Elapsed) -> Self {
+        CubeError {
+            message: "Query execution timed out. Please consider evaluating EXPLAIN plan and optimizing the query.".to_string(),
+            backtrace: Backtrace::capture().to_string(),
+            cause: CubeErrorCauseType::Internal,
+        }
     }
 }
 
@@ -268,7 +286,7 @@ impl From<CubeError> for datafusion::error::DataFusionError {
     }
 }
 
-impl From<arrow::error::ArrowError> for CubeError {
+impl From<ArrowError> for CubeError {
     fn from(v: ArrowError) -> Self {
         CubeError::from_error(v)
     }
@@ -304,29 +322,11 @@ impl From<flexbuffers::SerializationError> for CubeError {
     }
 }
 
-impl From<s3::S3Error> for CubeError {
-    fn from(v: s3::S3Error) -> Self {
-        let mut m = format!("AWS S3 error: {}", v);
-        if let Some(data) = v.data {
-            m += ": ";
-            m += &data
-        }
-        CubeError::internal(m)
+impl From<s3::error::S3Error> for CubeError {
+    fn from(v: s3::error::S3Error) -> Self {
+        CubeError::internal(format!("AWS S3 error: {}", v.to_string()))
     }
 }
-
-impl From<awscreds::AwsCredsError> for CubeError {
-    fn from(v: awscreds::AwsCredsError) -> Self {
-        CubeError::user(v.to_string())
-    }
-}
-
-impl From<awsregion::AwsRegionError> for CubeError {
-    fn from(v: awsregion::AwsRegionError) -> Self {
-        CubeError::user(v.to_string())
-    }
-}
-
 impl From<chrono::ParseError> for CubeError {
     fn from(v: chrono::ParseError) -> Self {
         CubeError::from_error(v)
@@ -439,6 +439,12 @@ impl From<hex::FromHexError> for CubeError {
 
 impl From<HllError> for CubeError {
     fn from(v: HllError) -> Self {
+        return CubeError::from_error(v);
+    }
+}
+
+impl From<cubedatasketches::DataSketchesError> for CubeError {
+    fn from(v: cubedatasketches::DataSketchesError) -> Self {
         return CubeError::from_error(v);
     }
 }

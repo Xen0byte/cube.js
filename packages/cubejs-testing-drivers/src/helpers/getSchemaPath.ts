@@ -9,7 +9,7 @@ import { getFixtures } from './getFixtures';
  * Returns schema yaml file by data source type.
  */
 export function getSchemaPath(type: string, suf?: string): [path: string, file: string] {
-  const _path = path.resolve(process.cwd(), './.temp/schema');
+  const _path = path.resolve(process.cwd(), './.temp/model');
   const _file = 'ecommerce.yaml';
   const { tables, preAggregations } = getFixtures(type);
   const _content = JSON.parse(fs.readFileSync(
@@ -18,7 +18,7 @@ export function getSchemaPath(type: string, suf?: string): [path: string, file: 
   ));
   _content.cubes.forEach(
     (cube: {
-      name: 'Products' | 'Customers' | 'ECommerce',
+      name: 'Products' | 'Customers' | 'ECommerce' | 'BigECommerce',
       [prop: string]: unknown
     }) => {
       let name = '';
@@ -32,8 +32,11 @@ export function getSchemaPath(type: string, suf?: string): [path: string, file: 
         case 'ECommerce':
           name = tables.ecommerce;
           break;
+        case 'BigECommerce':
+          name = tables.bigecommerce;
+          break;
         default:
-          throw new Error('Cube name is missing.');
+          throw new Error(`Cube name is unsupported: ${cube.name}`);
       }
       name = suf ? `${name}_${suf}` : name;
       cube.sql = `select * from ${name}`;
@@ -64,7 +67,7 @@ export function getSchemaPath(type: string, suf?: string): [path: string, file: 
 
   fs.writeFileSync(
     path.resolve(_path, _file),
-    YAML.stringify(_content),
+    YAML.stringify(_content, { version: '1.1' }),
   );
   return [_path, _file];
 }

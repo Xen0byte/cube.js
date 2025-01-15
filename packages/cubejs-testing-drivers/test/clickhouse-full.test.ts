@@ -1,3 +1,5 @@
 import { testQueries } from '../src/tests/testQueries';
 
-testQueries('clickhouse');
+testQueries('clickhouse', {
+  includeIncrementalSchemaSuite: true,
+});

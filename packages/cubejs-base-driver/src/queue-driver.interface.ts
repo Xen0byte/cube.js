@@ -1,4 +1,8 @@
 export type QueryDef = unknown;
+// Primary key of Queue item
+export type QueueId = string | number | bigint;
+// This was used as lock for Redis, deprecated.
+export type ProcessingId = string | number;
 export type QueryKey = (string | [string, any[]]) & {
   persistent?: true,
 };
@@ -6,20 +10,23 @@ export interface QueryKeyHash extends String {
   __type: 'QueryKeyHash'
 }
 
-export type GetActiveAndToProcessResponse = [active: string[], toProcess: string[]];
-export type AddToQueueResponse = [added: number, _b: any, _c: any, queueSize: number, addedToQueueTime: number];
+export type QueryKeysTuple = [keyHash: QueryKeyHash, queueId: QueueId | null /** Supported by new Cube Store and Memory */];
+export type GetActiveAndToProcessResponse = [active: QueryKeysTuple[], toProcess: QueryKeysTuple[]];
+export type AddToQueueResponse = [added: number, queueId: QueueId | null, queueSize: number, addedToQueueTime: number];
 export type QueryStageStateResponse = [active: string[], toProcess: string[]] | [active: string[], toProcess: string[], defs: Record<string, QueryDef>];
 export type RetrieveForProcessingSuccess = [
-  added: any /** todo(ovr): Remove, useless */,
-  removed: any /** todo(ovr): Remove, useless */,
+  added: unknown,
+  // QueueId is required for Cube Store, other providers doesn't support it
+  queueId: QueueId | null,
   active: QueryKeyHash[],
   pending: number,
   def: QueryDef,
   lockAquired: true
 ];
 export type RetrieveForProcessingFail = [
-  added: any /** todo(ovr): Remove, useless */,
-  removed: any /** todo(ovr): Remove, useless */,
+  added: unknown,
+  // QueueId is required for Cube Store, other providers doesn't support it
+  queueId: QueueId | null,
   active: QueryKeyHash[],
   pending: number,
   def: null,
@@ -36,6 +43,7 @@ export interface AddToQueueOptions {
   stageQueryKey: string,
   requestId: string,
   orphanedTimeout?: number,
+  queueId: QueueId,
 }
 
 export interface QueueDriverOptions {
@@ -48,11 +56,9 @@ export interface QueueDriverOptions {
   processUid?: string;
 }
 
-export type ProcessingId = string | number;
-
 export interface QueueDriverConnectionInterface {
   redisHash(queryKey: QueryKey): QueryKeyHash;
-  getResultBlocking(queryKey: QueryKey): Promise<unknown>;
+  getResultBlocking(queryKey: QueryKeyHash, queueId: QueueId): Promise<unknown>;
   getResult(queryKey: QueryKey): Promise<any>;
   /**
    * Adds specified by the queryKey query to the queue, returns tuple
@@ -68,27 +74,28 @@ export interface QueueDriverConnectionInterface {
    */
   addToQueue(keyScore: number, queryKey: QueryKey, orphanedTime: number, queryHandler: string, query: AddToQueueQuery, priority: number, options: AddToQueueOptions): Promise<AddToQueueResponse>;
   // Return query keys which was sorted by priority and time
-  getToProcessQueries(): Promise<string[]>;
-  getActiveQueries(): Promise<string[]>;
-  getQueryDef(queryKey: QueryKeyHash): Promise<QueryDef | null>;
+  getToProcessQueries(): Promise<QueryKeysTuple[]>;
+  getActiveQueries(): Promise<QueryKeysTuple[]>;
+  getQueryDef(hash: QueryKeyHash, queueId: QueueId | null): Promise<QueryDef | null>;
   // Queries which was added to queue, but was not processed and not needed
-  getOrphanedQueries(): Promise<string[]>;
+  getOrphanedQueries(): Promise<QueryKeysTuple[]>;
   // Queries which was not completed with old heartbeat
-  getStalledQueries(): Promise<string[]>;
+  getStalledQueries(): Promise<QueryKeysTuple[]>;
   getQueryStageState(onlyKeys: boolean): Promise<QueryStageStateResponse>;
-  updateHeartBeat(hash: QueryKeyHash): Promise<void>;
+  updateHeartBeat(hash: QueryKeyHash, queueId: QueueId | null): Promise<void>;
   getNextProcessingId(): Promise<ProcessingId>;
   // Trying to acquire a lock for processing a queue item, this method can return null when
   // multiple nodes tries to process the same query
   retrieveForProcessing(hash: QueryKeyHash, processingId: ProcessingId): Promise<RetrieveForProcessingResponse>;
   freeProcessingLock(hash: QueryKeyHash, processingId: ProcessingId, activated: unknown): Promise<void>;
-  optimisticQueryUpdate(hash: QueryKeyHash, toUpdate: unknown, processingId: ProcessingId): Promise<boolean>;
-  cancelQuery(queryKey: QueryKey): Promise<QueryDef | null>;
-  getQueryAndRemove(hash: QueryKeyHash): Promise<[QueryDef]>;
-  setResultAndRemoveQuery(hash: QueryKeyHash, executionResult: any, processingId: ProcessingId): Promise<unknown>;
+  optimisticQueryUpdate(hash: QueryKeyHash, toUpdate: unknown, processingId: ProcessingId, queueId: QueueId | null): Promise<boolean>;
+  cancelQuery(queryKey: QueryKey, queueId: QueueId | null): Promise<QueryDef | null>;
+  getQueryAndRemove(hash: QueryKeyHash, queueId: QueueId | null): Promise<[QueryDef]>;
+  setResultAndRemoveQuery(hash: QueryKeyHash, executionResult: any, processingId: ProcessingId, queueId: QueueId | null): Promise<unknown>;
   release(): void;
   //
-  getQueriesToCancel(): Promise<string[]>
+  getQueriesToCancel(): Promise<QueryKeysTuple[]>
+  // @deprecated
   getActiveAndToProcess(): Promise<GetActiveAndToProcessResponse>;
 }
 

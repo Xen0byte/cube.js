@@ -1,3 +1,3 @@
 import { testQueries } from '../src/tests/testQueries';
 
-testQueries('mysql');
+testQueries('mysql', { includeIncrementalSchemaSuite: true });

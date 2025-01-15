@@ -1,6 +1,4 @@
 import crypto from 'crypto';
-import fs from 'fs-extra';
-import path from 'path';
 import cloneDeep from 'lodash.clonedeep';
 import { BaseDriver } from '@cubejs-backend/query-orchestrator';
 import {
@@ -300,7 +298,7 @@ export class OptsHandler {
         // concurrency specified in cube.js
         return options;
       } else {
-        const envConcurrency: number = getEnv('concurrency');
+        const envConcurrency: number = getEnv('concurrency', { dataSource });
         if (envConcurrency) {
           // concurrency specified in CUBEJS_CONCURRENCY
           return {
@@ -470,7 +468,7 @@ export class OptsHandler {
         (this.isDevMode()
           ? 'dev_pre_aggregations'
           : 'prod_pre_aggregations'),
-      schemaPath: process.env.CUBEJS_SCHEMA_PATH || 'schema',
+      schemaPath: getEnv('schemaPath'),
       scheduledRefreshTimer: getEnv('refreshWorkerMode'),
       sqlCache: true,
       livePreview: getEnv('livePreview'),

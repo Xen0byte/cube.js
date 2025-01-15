@@ -14,24 +14,39 @@ import type {
 import type { OptsHandler } from '../../src/core/OptsHandler';
 import { lookupDriverClass } from '../../src/core/DriverResolvers';
 import { CubejsServerCore } from '../../src/core/server';
+import { CreateOptions, SystemOptions } from '../../src/core/types';
 
 class CubejsServerCoreExposed extends CubejsServerCore {
-  public options: ServerCoreInitializedOptions;
+  public declare options: ServerCoreInitializedOptions;
 
-  public optsHandler: OptsHandler;
+  public declare optsHandler: OptsHandler;
 
-  public contextToDbType: DbTypeAsyncFn;
+  public declare contextToDbType: DbTypeAsyncFn;
 
-  public contextToExternalDbType: ExternalDbTypeFn;
+  public declare contextToExternalDbType: ExternalDbTypeFn;
 
-  public apiGateway = super.apiGateway;
+  public declare apiGateway;
 
-  public reloadEnvVariables = super.reloadEnvVariables;
+  public declare reloadEnvVariables;
+
+  public constructor(
+    opts: CreateOptions = {},
+    systemOptions?: SystemOptions,
+  ) {
+    // disable telemetry while testing
+    super({ ...opts, telemetry: false, }, systemOptions);
+  }
+
+  public startScheduledRefreshTimer() {
+    // disabling interval
+    return null;
+  }
 }
 
 let message: string;
 
 const conf = {
+  apiSecret: 'testApiSecretToSuppressWarning',
   logger: (msg: string) => {
     message = msg;
   },
@@ -39,11 +54,7 @@ const conf = {
   externalDriverFactory: async () => <OriginalBaseDriver>({
     testConnection: async () => undefined,
   }),
-  orchestratorOptions: () => ({
-    redisPoolOptions: {
-      createClient: async () => undefined
-    },
-  }),
+  orchestratorOptions: () => ({}),
 };
 
 describe('OptsHandler class', () => {
@@ -56,7 +67,7 @@ describe('OptsHandler class', () => {
     'need to be restored after documentation will be added',
     async () => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
-      const core = new CubejsServerCore({
+      const core = new CubejsServerCoreExposed({
         ...conf,
         // eslint-disable-next-line @typescript-eslint/no-unused-vars
         dbType: ((context: DriverContext) => 'postgres'),
@@ -65,88 +76,94 @@ describe('OptsHandler class', () => {
     }
   );
 
-  test('must handle vanila CreateOptions', async () => {
+  test('must handle vanilla CreateOptions', async () => {
     process.env.CUBEJS_DB_TYPE = 'postgres';
 
-    let core;
-
     // Case 1
-    core = new CubejsServerCoreExposed({
-      ...conf,
-      dbType: undefined,
-      driverFactory: undefined,
-    });
+    {
+      const core = new CubejsServerCoreExposed({
+        ...conf,
+        dbType: undefined,
+        driverFactory: undefined,
+      });
 
-    expect(core.options.dbType).toBeDefined();
-    expect(typeof core.options.dbType).toEqual('function');
-    expect(await core.options.dbType({} as DriverContext))
-      .toEqual(process.env.CUBEJS_DB_TYPE);
+      expect(core.options.dbType).toBeDefined();
+      expect(typeof core.options.dbType).toEqual('function');
+      expect(await core.options.dbType({} as DriverContext))
+        .toEqual(process.env.CUBEJS_DB_TYPE);
 
-    expect(core.options.driverFactory).toBeDefined();
-    expect(typeof core.options.driverFactory).toEqual('function');
-    expect(await core.options.driverFactory({} as DriverContext)).toEqual({
-      type: process.env.CUBEJS_DB_TYPE,
-    });
+      expect(core.options.driverFactory).toBeDefined();
+      expect(typeof core.options.driverFactory).toEqual('function');
+      expect(await core.options.driverFactory({} as DriverContext)).toEqual({
+        type: process.env.CUBEJS_DB_TYPE,
+      });
+    }
 
     // Case 2
-    core = new CubejsServerCoreExposed({
-      ...conf,
-      dbType: 'postgres',
-      driverFactory: () => CubejsServerCore.createDriver('postgres'),
-    });
+    {
+      const core = new CubejsServerCoreExposed({
+        ...conf,
+        dbType: 'postgres',
+        driverFactory: () => CubejsServerCore.createDriver('postgres'),
+      });
 
-    expect(core.options.dbType).toBeDefined();
-    expect(typeof core.options.dbType).toEqual('function');
-    expect(await core.options.dbType({} as DriverContext))
-      .toEqual(process.env.CUBEJS_DB_TYPE);
+      expect(core.options.dbType).toBeDefined();
+      expect(typeof core.options.dbType).toEqual('function');
+      expect(await core.options.dbType({} as DriverContext))
+        .toEqual(process.env.CUBEJS_DB_TYPE);
 
-    expect(core.options.driverFactory).toBeDefined();
-    expect(typeof core.options.driverFactory).toEqual('function');
-    expect(
-      JSON.stringify(await core.options.driverFactory({} as DriverContext)),
-    ).toEqual(
-      JSON.stringify(CubejsServerCore.createDriver('postgres')),
-    );
+      expect(core.options.driverFactory).toBeDefined();
+      expect(typeof core.options.driverFactory).toEqual('function');
+      expect(
+        JSON.stringify(await core.options.driverFactory({} as DriverContext)),
+      ).toEqual(
+        JSON.stringify(CubejsServerCore.createDriver('postgres')),
+      );
+    }
 
     // Case 3
-    core = new CubejsServerCoreExposed({
-      ...conf,
-      dbType: () => 'postgres',
-      driverFactory: () => CubejsServerCore.createDriver('postgres'),
-    });
+    {
+      const core = new CubejsServerCoreExposed({
+        ...conf,
+        dbType: () => 'postgres',
+        driverFactory: () => CubejsServerCore.createDriver('postgres'),
+      });
 
-    expect(core.options.dbType).toBeDefined();
-    expect(typeof core.options.dbType).toEqual('function');
-    expect(await core.options.dbType({} as DriverContext))
-      .toEqual(process.env.CUBEJS_DB_TYPE);
+      expect(core.options.dbType).toBeDefined();
+      expect(typeof core.options.dbType).toEqual('function');
+      expect(await core.options.dbType({} as DriverContext))
+        .toEqual(process.env.CUBEJS_DB_TYPE);
 
-    expect(core.options.driverFactory).toBeDefined();
-    expect(typeof core.options.driverFactory).toEqual('function');
-    expect(
-      JSON.stringify(await core.options.driverFactory({} as DriverContext)),
-    ).toEqual(
-      JSON.stringify(CubejsServerCore.createDriver('postgres')),
-    );
+      expect(core.options.driverFactory).toBeDefined();
+      expect(typeof core.options.driverFactory).toEqual('function');
+      expect(
+        JSON.stringify(await core.options.driverFactory({} as DriverContext)),
+      ).toEqual(
+        JSON.stringify(CubejsServerCore.createDriver('postgres')),
+      );
+    }
 
     // Case 4
-    core = new CubejsServerCoreExposed({
-      ...conf,
-      dbType: () => 'postgres',
-      driverFactory: async () => CubejsServerCore.createDriver('postgres'),
-    });
+    {
+      const core = new CubejsServerCoreExposed({
+        ...conf,
+        dbType: () => 'postgres',
+        driverFactory: async () => CubejsServerCore.createDriver('postgres'),
+      });
 
-    expect(core.options.dbType).toBeDefined();
-    expect(typeof core.options.dbType).toEqual('function');
-    expect(await core.options.dbType({} as DriverContext))
-      .toEqual(process.env.CUBEJS_DB_TYPE);
+      expect(core.options.dbType).toBeDefined();
+      expect(typeof core.options.dbType).toEqual('function');
+      expect(await core.options.dbType({} as DriverContext))
+        .toEqual(process.env.CUBEJS_DB_TYPE);
 
-    expect(core.options.driverFactory).toBeDefined();
-    expect(typeof core.options.driverFactory).toEqual('function');
-    expect(
-      JSON.stringify(await core.options.driverFactory({} as DriverContext)),
-    ).toEqual(
-      JSON.stringify(CubejsServerCore.createDriver('postgres')),
-    );
+      expect(core.options.driverFactory).toBeDefined();
+      expect(typeof core.options.driverFactory).toEqual('function');
+      expect(
+        JSON.stringify(await core.options.driverFactory({} as DriverContext)),
+      ).toEqual(
+        JSON.stringify(CubejsServerCore.createDriver('postgres')),
+      );
+    }
   });
 
   test('must handle valid CreateOptions', async () => {
@@ -314,6 +331,7 @@ describe('OptsHandler class', () => {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       core = new CubejsServerCoreExposed({
         ...conf,
+        apiSecret: undefined,
         dbType: undefined,
         driverFactory: undefined,
       });
@@ -398,7 +416,7 @@ describe('OptsHandler class', () => {
       JSON.stringify(new CustomDriver()),
     );
 
-    const oapi = (<any>core.getOrchestratorApi(<RequestContext>{}));
+    const oapi = (<any> await core.getOrchestratorApi(<RequestContext>{}));
     const opts = oapi.options;
     const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
     oapi.seenDataSources = ['default'];
@@ -414,7 +432,7 @@ describe('OptsHandler class', () => {
     testDriverConnectionSpy.mockRestore();
   });
 
-  test('must determine correcct driver type by the query context', async () => {
+  test('must determine correct driver type by the query context', async () => {
     class Driver1 extends OriginalBaseDriver {
       public async testConnection() {
         //
@@ -465,7 +483,7 @@ describe('OptsHandler class', () => {
       },
     });
 
-    const oapi1 = (<any>core.getOrchestratorApi({
+    const oapi1 = (<any> await core.getOrchestratorApi({
       authInfo: {},
       securityContext: { tenantId: 1 },
       requestId: '1',
@@ -476,7 +494,7 @@ describe('OptsHandler class', () => {
     expect(driver11 instanceof Driver1).toBeTruthy();
     expect(driver12 instanceof Driver1).toBeTruthy();
 
-    const oapi2 = (<any>core.getOrchestratorApi({
+    const oapi2 = (<any> await core.getOrchestratorApi({
       authInfo: {},
       securityContext: { tenantId: 2 },
       requestId: '2',
@@ -502,7 +520,7 @@ describe('OptsHandler class', () => {
         orchestratorOptions: {},
       });
 
-      const opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+      const opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
 
       expect(opts.queryCacheOptions.queueOptions).toBeDefined();
       expect(typeof opts.queryCacheOptions.queueOptions).toEqual('function');
@@ -532,7 +550,7 @@ describe('OptsHandler class', () => {
         orchestratorOptions: {},
       });
 
-      const opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+      const opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
 
       expect(opts.queryCacheOptions.queueOptions).toBeDefined();
       expect(typeof opts.queryCacheOptions.queueOptions).toEqual('function');
@@ -562,7 +580,7 @@ describe('OptsHandler class', () => {
         orchestratorOptions: () => ({}),
       });
 
-      const opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+      const opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
 
       expect(opts.queryCacheOptions.queueOptions).toBeDefined();
       expect(typeof opts.queryCacheOptions.queueOptions).toEqual('function');
@@ -592,7 +610,7 @@ describe('OptsHandler class', () => {
         orchestratorOptions: () => ({}),
       });
 
-      const opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+      const opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
 
       expect(opts.queryCacheOptions.queueOptions).toBeDefined();
       expect(typeof opts.queryCacheOptions.queueOptions).toEqual('function');
@@ -622,7 +640,7 @@ describe('OptsHandler class', () => {
         orchestratorOptions: () => ({}),
       });
 
-      const opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+      const opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
 
       expect(opts.queryCacheOptions.queueOptions).toBeDefined();
       expect(typeof opts.queryCacheOptions.queueOptions).toEqual('function');
@@ -637,6 +655,39 @@ describe('OptsHandler class', () => {
       });
 
       delete process.env.CUBEJS_CONCURRENCY;
+    }
+  );
+
+  test(
+    'multi data source concurrency',
+    async () => {
+      process.env.CUBEJS_DATASOURCES = 'default,postgres';
+      process.env.CUBEJS_DS_POSTGRES_CONCURRENCY = '10';
+      process.env.CUBEJS_DS_POSTGRES_DB_TYPE = 'postgres';
+      process.env.CUBEJS_DB_TYPE = 'postgres';
+
+      const core = new CubejsServerCoreExposed({
+        ...conf,
+        dbType: undefined,
+        driverFactory: () => ({ type: <DatabaseType>process.env.CUBEJS_DB_TYPE }),
+        orchestratorOptions: () => ({}),
+      });
+
+      const opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
+
+      expect(opts.queryCacheOptions.queueOptions).toBeDefined();
+      expect(typeof opts.queryCacheOptions.queueOptions).toEqual('function');
+      expect(await opts.queryCacheOptions.queueOptions()).toEqual({
+        concurrency: 2,
+      });
+      expect(await opts.queryCacheOptions.queueOptions('postgres')).toEqual({
+        concurrency: 10,
+      });
+
+      delete process.env.CUBEJS_DATASOURCES;
+      delete process.env.CUBEJS_DS_POSTGRES_CONCURRENCY;
+      delete process.env.CUBEJS_DS_POSTGRES_DB_TYPE;
+      delete process.env.CUBEJS_DB_TYPE;
     }
   );
 
@@ -666,7 +717,7 @@ describe('OptsHandler class', () => {
         }),
       });
 
-      const opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+      const opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
 
       expect(opts.queryCacheOptions.queueOptions).toBeDefined();
       expect(typeof opts.queryCacheOptions.queueOptions).toEqual('function');
@@ -713,7 +764,7 @@ describe('OptsHandler class', () => {
         testConnectionTimeout,
       }),
     });
-    opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+    opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
     driver = <any>(await core.resolveDriver(<DriverContext>{}, opts));
 
     expect(driver.pool.options.max).toEqual(2 * (concurrency1 + concurrency2));
@@ -740,9 +791,9 @@ describe('OptsHandler class', () => {
         },
       }),
     });
-    opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+    opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
     driver = <any>(await core.resolveDriver(<DriverContext>{}));
-    
+
     expect(driver.pool.options.max).toEqual(8);
     expect(driver.testConnectionTimeout()).toEqual(testConnectionTimeout);
 
@@ -764,7 +815,7 @@ describe('OptsHandler class', () => {
         },
       }),
     });
-    opts = (<any>core.getOrchestratorApi(<RequestContext>{})).options;
+    opts = (<any> await core.getOrchestratorApi(<RequestContext>{})).options;
     driver = <any>(await core.resolveDriver(<DriverContext>{}));
 
     expect(driver.pool.options.max).toEqual(8);
@@ -788,7 +839,7 @@ describe('OptsHandler class', () => {
         }),
       });
 
-      const oapi = <any>(core.getOrchestratorApi(<RequestContext>{}));
+      const oapi = <any>(await core.getOrchestratorApi(<RequestContext>{}));
       const opts = oapi.options;
       const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
       oapi.seenDataSources = ['default'];
@@ -828,7 +879,7 @@ describe('OptsHandler class', () => {
         }),
       });
 
-      const oapi = <any>(core.getOrchestratorApi(<RequestContext>{}));
+      const oapi = <any>(await core.getOrchestratorApi(<RequestContext>{}));
       const opts = oapi.options;
       const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
       oapi.seenDataSources = ['default'];
@@ -865,7 +916,7 @@ describe('OptsHandler class', () => {
         }),
       });
 
-      const oapi = <any>(core.getOrchestratorApi(<RequestContext>{}));
+      const oapi = <any>(await core.getOrchestratorApi(<RequestContext>{}));
       const opts = oapi.options;
       const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
       oapi.seenDataSources = ['default'];
@@ -900,7 +951,7 @@ describe('OptsHandler class', () => {
         }),
       });
 
-      const oapi = <any>(core.getOrchestratorApi(<RequestContext>{}));
+      const oapi = <any>(await core.getOrchestratorApi(<RequestContext>{}));
       const opts = oapi.options;
       const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
       oapi.seenDataSources = ['default'];
@@ -937,7 +988,7 @@ describe('OptsHandler class', () => {
         }),
       });
 
-      const oapi = <any>(core.getOrchestratorApi(<RequestContext>{}));
+      const oapi = <any>(await core.getOrchestratorApi(<RequestContext>{}));
       const opts = oapi.options;
       const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
       oapi.seenDataSources = ['default'];
@@ -973,16 +1024,13 @@ describe('OptsHandler class', () => {
           database: 'database',
         }),
         orchestratorOptions: () => ({
-          redisPoolOptions: {
-            createClient: async () => undefined
-          },
           preAggregationsOptions: {
             externalRefresh: true,
           },
         }),
       });
 
-      const oapi = <any>(core.getOrchestratorApi(<RequestContext>{}));
+      const oapi = <any>(await core.getOrchestratorApi(<RequestContext>{}));
       const opts = oapi.options;
       const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
       oapi.seenDataSources = ['default'];
@@ -1019,7 +1067,7 @@ describe('OptsHandler class', () => {
         }),
       });
 
-      const oapi = <any>(core.getOrchestratorApi(<RequestContext>{}));
+      const oapi = <any>(await core.getOrchestratorApi(<RequestContext>{}));
       const opts = oapi.options;
       const testDriverConnectionSpy = jest.spyOn(oapi, 'testDriverConnection');
       oapi.seenDataSources = ['default'];
@@ -1057,7 +1105,7 @@ describe('OptsHandler class', () => {
     const permissions = await gateway.contextToApiScopesFn();
     expect(permissions).toBeDefined();
     expect(Array.isArray(permissions)).toBeTruthy();
-    expect(permissions).toEqual(['liveliness', 'graphql', 'meta', 'data']);
+    expect(permissions).toEqual(['graphql', 'meta', 'data']);
   });
 
   test('must set env api scopes if fn not specified', async () => {
@@ -1094,7 +1142,6 @@ describe('OptsHandler class', () => {
     process.env.CUBEJS_PRE_AGGREGATIONS_BUILDER = 'false';
 
     type ApiScopes =
-      'liveliness' |
       'graphql' |
       'meta' |
       'data' |
@@ -1115,9 +1162,7 @@ describe('OptsHandler class', () => {
     });
 
     const gateway = <any>core.apiGateway();
-    expect(async () => {
-      await gateway.contextToApiScopesFn();
-    }).rejects.toThrow(
+    await expect(async () => gateway.contextToApiScopesFn()).rejects.toThrow(
       'A user-defined contextToApiScopes function returns an inconsistent type.'
     );
   });
@@ -1128,7 +1173,6 @@ describe('OptsHandler class', () => {
     process.env.CUBEJS_PRE_AGGREGATIONS_BUILDER = 'false';
 
     type ApiScopes =
-      'liveliness' |
       'graphql' |
       'meta' |
       'data' |
@@ -1144,14 +1188,12 @@ describe('OptsHandler class', () => {
         database: 'database',
       }),
       contextToApiScopes: async () => new Promise((resolve) => {
-        resolve(['liveliness', 'graphql', 'meta', 'data', 'job'] as unknown as ApiScopes[]);
+        resolve(['graphql', 'meta', 'data', 'job'] as unknown as ApiScopes[]);
       }),
     });
 
     const gateway = <any>core.apiGateway();
-    expect(async () => {
-      await gateway.contextToApiScopesFn();
-    }).rejects.toThrow(
+    await expect(async () => gateway.contextToApiScopesFn()).rejects.toThrow(
       'A user-defined contextToApiScopes function returns a wrong scope: job'
     );
   });
@@ -1172,7 +1214,7 @@ describe('OptsHandler class', () => {
         database: 'database',
       }),
       contextToApiScopes: async () => new Promise((resolve) => {
-        resolve(['liveliness', 'graphql', 'meta', 'data', 'jobs']);
+        resolve(['graphql', 'meta', 'data', 'jobs']);
       }),
     });
 
@@ -1180,6 +1222,6 @@ describe('OptsHandler class', () => {
     const permissions = await gateway.contextToApiScopesFn();
     expect(permissions).toBeDefined();
     expect(Array.isArray(permissions)).toBeTruthy();
-    expect(permissions).toEqual(['liveliness', 'graphql', 'meta', 'data', 'jobs']);
+    expect(permissions).toEqual(['graphql', 'meta', 'data', 'jobs']);
   });
 });

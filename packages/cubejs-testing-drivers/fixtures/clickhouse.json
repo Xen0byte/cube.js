@@ -1,4 +1,17 @@
 {
+  "extendedEnvs": {
+    "export-bucket-s3": {
+      "cube": {
+        "environment": {
+          "CUBEJS_DB_EXPORT_BUCKET_TYPE": "s3",
+          "CUBEJS_DB_EXPORT_BUCKET": "clickhouse-drivers-tests-preaggs",
+          "CUBEJS_DB_EXPORT_BUCKET_AWS_KEY": "${DRIVERS_TESTS_CUBEJS_DB_EXPORT_BUCKET_AWS_KEY}",
+          "CUBEJS_DB_EXPORT_BUCKET_AWS_SECRET": "${DRIVERS_TESTS_CUBEJS_DB_EXPORT_BUCKET_AWS_SECRET}",
+          "CUBEJS_DB_EXPORT_BUCKET_AWS_REGION": "us-east-1"
+        }
+      }
+    }
+  },
   "cube": {
     "environment": {
       "CUBEJS_API_SECRET": "mysupersecret",
@@ -8,21 +21,32 @@
       "CUBEJS_DB_HOST": "data",
       "CUBEJS_DB_NAME": "test",
       "CUBEJS_DB_USER": "test",
-      "CUBEJS_DB_PASS": "test"
+      "CUBEJS_DB_PASS": "test",
+      "CUBEJS_PG_SQL_PORT": "5656",
+      "CUBEJS_SQL_USER": "admin",
+      "CUBEJS_SQL_PASSWORD": "admin_password",
+      "CUBESQL_SQL_PUSH_DOWN": "true"
     },
     "depends_on": ["data"],
     "links": ["data"],
-    "ports" : ["4000"]
+    "ports" : ["4000", "5656"]
   },
   "data": {
-    "image": "clickhouse/clickhouse-server",
+    "image": "clickhouse/clickhouse-server:23.10",
     "environment": {
       "CLICKHOUSE_DB": "test",
       "CLICKHOUSE_USER": "test",
       "CLICKHOUSE_PASSWORD": "test",
       "CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT": 1
     },
-    "ports" : ["8123"]
+    "ports" : ["8123"],
+    "healthcheck": {
+      "test": "wget --spider -q --spider http://localhost:8123/ping || exit 1",
+      "start_period": "5s",
+      "interval": "10s",
+      "retries": 3,
+      "timeout": "5s"
+    }
   },
   "cast": {
     "SELECT_PREFIX": "",
@@ -37,7 +61,8 @@
   "tables": {
     "products": "products",
     "customers": "customers",
-    "ecommerce": "ecommerce"
+    "ecommerce": "ecommerce",
+    "bigecommerce": "bigecommerce"
   },
   "preAggregations": {
     "Products": [],
@@ -45,14 +70,13 @@
       {
         "name": "RA",
         "measures": ["CUBE.count", "CUBE.runningTotal"],
-        "indexes": {
-          "category_index": {
-            "columns": [
-              "CUBE.count",
-              "CUBE.runningTotal"
-            ]
-          }
-        }
+        "indexes": [{
+          "name": "category_index",
+          "columns": [
+            "CUBE.count",
+            "CUBE.runningTotal"
+          ]
+        }]
       }
     ],
     "ECommerce": [
@@ -65,11 +89,10 @@
           "CUBE.totalSales",
           "CUBE.totalProfit"
         ],
-        "indexes": {
-          "category_index": {
-            "columns": ["CUBE.productName"]
-          }
-        }
+        "indexes": [{
+          "name": "category_index",
+          "columns": ["CUBE.productName"]
+        }]
       },
       {
         "name": "TA",
@@ -83,20 +106,88 @@
           "CUBE.totalSales",
           "CUBE.totalProfit"
         ],
-        "indexes": {
-          "category_index": {
-            "columns": ["CUBE.productName"]
+        "indexes": [{
+          "name": "category_index",
+          "columns": ["CUBE.productName"]
+        }]
+      }
+    ],
+    "BigECommerce": [
+      {
+        "name": "TA",
+        "time_dimension": "CUBE.orderDate",
+        "granularity": "month",
+        "partition_granularity": "year",
+        "dimensions": ["CUBE.productName", "CUBE.id"],
+        "measures": [
+          "CUBE.totalQuantity",
+          "CUBE.avgDiscount",
+          "CUBE.totalSales",
+          "CUBE.totalProfit"
+        ],
+        "indexes": [{
+          "name": "category_index",
+          "columns": ["CUBE.productName"]
+        }]
+      },
+      {
+        "name": "MultiTimeDimForCount",
+        "time_dimensions": [
+          {
+            "dimension": "CUBE.completedDate",
+            "granularity": "day"
+          },
+          {
+            "dimension": "CUBE.orderDate",
+            "granularity": "day"
           }
-        }
+        ],
+        "dimensions": ["CUBE.productName"],
+        "partition_granularity": "month",
+        "measures": [
+          "CUBE.count"
+        ],
+        "indexes": [{
+          "name": "category_index",
+          "columns": ["CUBE.productName"]
+        }]
       }
     ]
   },
   "skip": [
-    "SKIPED FOR ALL",
+    "---------------------------------------",
+    "SKIPPED FOR ALL                        ",
     "---------------------------------------",
     "querying Products: dimensions -- doesn't work wo ordering",
     "querying ECommerce: total quantity, avg discount, total sales, total profit by product + order + total -- rounding in athena",
     "querying ECommerce: total sales, total profit by month + order (date) + total -- doesn't work with the BigQuery",
-    "querying ECommerce: total quantity, avg discount, total sales, total profit by product + order + total -- noisy test"
+    "querying ECommerce: total quantity, avg discount, total sales, total profit by product + order + total -- noisy test",
+    "querying ECommerce: partitioned pre-agg",
+    "querying ECommerce: partitioned pre-agg higher granularity",
+    "querying BigECommerce: partitioned pre-agg",
+    "querying BigECommerce: null sum",
+    "querying BigECommerce: null boolean",
+    "Unsupported JOIN ON conditions. Unexpected 'big_e_commerce__order_date_month > subtractWeeks(date_to, 2)'",
+    "--------------------",
+    "querying BigECommerce: rolling window by 2 day",
+    "querying BigECommerce: rolling window by 2 week",
+    "querying BigECommerce: rolling window by 2 month",
+
+    "---------------------------------------",
+    "Custom Granularities                   ",
+    "---------------------------------------",
+    "querying custom granularities ECommerce: count by two_mo_by_feb + no dimension + rollingCountByUnbounded",
+    "querying custom granularities ECommerce: count by two_mo_by_feb + no dimension + rollingCountByTrailing",
+    "querying custom granularities ECommerce: count by two_mo_by_feb + no dimension + rollingCountByLeading",
+
+    "---------------------------------------",
+    "SKIPPED SQL API (Need work)",
+    "---------------------------------------",
+    "SQL API: Complex Rollup",
+    "SQL API: Extended nested Rollup over asterisk",
+    "SQL API: Nested Rollup over asterisk",
+    "SQL API: Rollup over exprs",
+    "SQL API: Rollup with aliases",
+    "SQL API: Simple Rollup"
   ]
 }

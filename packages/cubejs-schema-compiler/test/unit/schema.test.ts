@@ -1,5 +1,5 @@
 import { prepareCompiler } from './PrepareCompiler';
-import { createCubeSchema } from './utils';
+import { createCubeSchema, createCubeSchemaWithCustomGranularities, createCubeSchemaWithAccessPolicy } from './utils';
 
 describe('Schema Testing', () => {
   const schemaCompile = async () => {
@@ -230,23 +230,104 @@ describe('Schema Testing', () => {
     await compiler.compile();
 
     expect(metaTransformer.cubes[0]).toMatchObject({
-      isVisible: false,
       config: {
+        isVisible: false,
         name: 'CubeA',
       }
     });
     expect(metaTransformer.cubes[1]).toMatchObject({
-      isVisible: true,
       config: {
+        isVisible: true,
         name: 'CubeB',
       }
     });
     expect(metaTransformer.cubes[2]).toMatchObject({
-      isVisible: false,
       config: {
+        isVisible: false,
         name: 'CubeC',
       }
     });
+  });
+
+  it('dimensions', async () => {
+    const { compiler, metaTransformer } = prepareCompiler([
+      createCubeSchema({
+        name: 'CubeA',
+        publicly: false,
+      }),
+    ]);
+    await compiler.compile();
+
+    const { dimensions } = metaTransformer.cubes[0].config;
+
+    expect(dimensions).toBeDefined();
+    expect(dimensions.length).toBeGreaterThan(0);
+    expect(dimensions.every((dimension) => dimension.primaryKey)).toBeDefined();
+    expect(dimensions.every((dimension) => typeof dimension.primaryKey === 'boolean')).toBe(true);
+    expect(dimensions.find((dimension) => dimension.name === 'CubeA.id').primaryKey).toBe(true);
+    expect(dimensions.find((dimension) => dimension.name === 'CubeA.type').primaryKey).toBe(false);
+  });
+
+  it('descriptions', async () => {
+    const { compiler, metaTransformer } = prepareCompiler([
+      createCubeSchema({
+        name: 'CubeA',
+        publicly: false,
+      }),
+    ]);
+    await compiler.compile();
+
+    const { description, dimensions, measures, segments } = metaTransformer.cubes[0].config;
+
+    expect(description).toBe('test cube from createCubeSchema');
+
+    expect(dimensions).toBeDefined();
+    expect(dimensions.length).toBeGreaterThan(0);
+    expect(dimensions.find((dimension) => dimension.name === 'CubeA.id').description).toBe('id dimension from createCubeSchema');
+
+    expect(measures).toBeDefined();
+    expect(measures.length).toBeGreaterThan(0);
+    expect(measures.find((measure) => measure.name === 'CubeA.count').description).toBe('count measure from createCubeSchema');
+
+    expect(segments).toBeDefined();
+    expect(segments.length).toBeGreaterThan(0);
+    expect(segments.find((segment) => segment.name === 'CubeA.sfUsers').description).toBe('SF users segment from createCubeSchema');
+  });
+
+  it('custom granularities in meta', async () => {
+    const { compiler, metaTransformer } = prepareCompiler([
+      createCubeSchemaWithCustomGranularities('orders')
+    ]);
+    await compiler.compile();
+
+    const { dimensions } = metaTransformer.cubes[0].config;
+
+    expect(dimensions).toBeDefined();
+    expect(dimensions.length).toBeGreaterThan(0);
+
+    const dg = dimensions.find((dimension) => dimension.name === 'orders.createdAt');
+    expect(dg).toBeDefined();
+    expect(dg.granularities).toBeDefined();
+    expect(dg.granularities.length).toBeGreaterThan(0);
+
+    // Granularity defined with title
+    let gr = dg.granularities.find(g => g.name === 'half_year');
+    expect(gr).toBeDefined();
+    expect(gr.title).toBe('6 month intervals');
+    expect(gr.interval).toBe('6 months');
+
+    gr = dg.granularities.find(g => g.name === 'half_year_by_1st_april');
+    expect(gr).toBeDefined();
+    expect(gr.title).toBe('Half year from Apr to Oct');
+    expect(gr.interval).toBe('6 months');
+    expect(gr.offset).toBe('3 months');
+
+    // // Granularity defined without title -> titlize()
+    gr = dg.granularities.find(g => g.name === 'half_year_by_1st_june');
+    expect(gr).toBeDefined();
+    expect(gr.title).toBe('Half Year By1 St June');
+    expect(gr.interval).toBe('6 months');
+    expect(gr.origin).toBe('2020-06-01 10:00:00');
   });
 
   it('join types', async () => {
@@ -285,5 +366,13 @@ describe('Schema Testing', () => {
       CubeC: { relationship: 'hasMany' },
       CubeD: { relationship: 'belongsTo' }
     });
+  });
+
+  it('valid schema with accessPolicy', async () => {
+    const { compiler } = prepareCompiler([
+      createCubeSchemaWithAccessPolicy('ProtectedCube'),
+    ]);
+    await compiler.compile();
+    compiler.throwIfAnyErrors();
   });
 });

@@ -28,7 +28,7 @@ export const preAggregationsResultFactory = () => ([
 
 export const preAggregationPartitionsResultFactory = () => ([
   {
-    timezone: 'UTC',
+    timezones: ['UTC'],
     preAggregation: preAggregationsResultFactory()[0],
     partitions: [{
       tableName: 'dev_pre_aggregations.usage_usages20210430'
@@ -59,7 +59,7 @@ export const preAggregationVersionEntriesResultFactory = () => ({
   }
 });
 
-export const compilerApi = jest.fn().mockImplementation(() => ({
+export const compilerApi = jest.fn().mockImplementation(async () => ({
   async getSql() {
     return {
       sql: ['SELECT * FROM test', []],
@@ -75,24 +75,50 @@ export const compilerApi = jest.fn().mockImplementation(() => ({
     return 'postgres';
   },
 
+  async applyRowLevelSecurity(query: any) {
+    return { query, denied: false };
+  },
+
   async metaConfig() {
     return [
       {
         config: {
           name: 'Foo',
+          description: 'cube from compilerApi mock',
           measures: [
             {
               name: 'Foo.bar',
+              description: 'measure from compilerApi mock',
               isVisible: true,
             },
           ],
           dimensions: [
             {
               name: 'Foo.id',
+              description: 'id dimension from compilerApi mock',
               isVisible: true,
             },
             {
               name: 'Foo.time',
+              isVisible: true,
+            },
+            {
+              name: 'Foo.timeGranularities',
+              isVisible: true,
+              granularities: [
+                {
+                  name: 'half_year_by_1st_april',
+                  title: 'Half Year By1 St April',
+                  interval: '6 months',
+                  offset: '3 months'
+                }
+              ]
+            },
+          ],
+          segments: [
+            {
+              name: 'Foo.quux',
+              description: 'segment from compilerApi mock',
               isVisible: true,
             },
           ],
@@ -106,9 +132,11 @@ export const compilerApi = jest.fn().mockImplementation(() => ({
       {
         config: {
           name: 'Foo',
+          description: 'cube from compilerApi mock',
           measures: [
             {
               name: 'Foo.bar',
+              description: 'measure from compilerApi mock',
               sql: 'bar',
               isVisible: true,
             },
@@ -116,10 +144,18 @@ export const compilerApi = jest.fn().mockImplementation(() => ({
           dimensions: [
             {
               name: 'Foo.id',
+              description: 'id dimension from compilerApi mock',
               isVisible: true,
             },
             {
               name: 'Foo.time',
+              isVisible: true,
+            },
+          ],
+          segments: [
+            {
+              name: 'Foo.quux',
+              description: 'segment from compilerApi mock',
               isVisible: true,
             },
           ],

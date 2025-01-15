@@ -13,8 +13,11 @@ import { toSnakeCase } from '../utils';
 
 const JOIN_RELATIONSHIP_MAP = {
   hasOne: 'one_to_one',
+  has_one: 'one_to_one',
   hasMany: 'one_to_many',
+  has_many: 'one_to_many',
   belongsTo: 'many_to_one',
+  belongs_to: 'many_to_one',
 };
 
 export type SchemaFile = {
@@ -24,6 +27,7 @@ export type SchemaFile = {
 
 export type SchemaFormatterOptions = {
   snakeCase: boolean;
+  catalog?: string | null;
 };
 
 export abstract class BaseSchemaFormatter {
@@ -103,17 +107,21 @@ export abstract class BaseSchemaFormatter {
   }
 
   public schemaDescriptorForTable(tableSchema: TableSchema, schemaContext: SchemaContext = {}) {
-    const table = `${
+    let table = `${
       tableSchema.schema?.length ? `${this.escapeName(tableSchema.schema)}.` : ''
     }${this.escapeName(tableSchema.table)}`;
-    
+
+    if (this.options.catalog) {
+      table = `${this.escapeName(this.options.catalog)}.${table}`;
+    }
+
     const { dataSource, ...contextProps } = schemaContext;
-      
+
     let dataSourceProp = {};
     if (dataSource) {
       dataSourceProp = this.options.snakeCase ? { data_source: dataSource } : { dataSource };
     }
-      
+
     const sqlOption = this.options.snakeCase
       ? {
         sql_table: table,
@@ -126,14 +134,7 @@ export abstract class BaseSchemaFormatter {
       cube: tableSchema.cube,
       ...sqlOption,
       ...dataSourceProp,
-      
-      [this.options.snakeCase ? 'pre_aggregations' : 'preAggregations']: new ValueWithComments(
-        null,
-        [
-          'Pre-aggregation definitions go here',
-          'Learn more here: https://cube.dev/docs/caching/pre-aggregations/getting-started',
-        ]
-      ),
+
       joins: tableSchema.joins
         .map((j) => ({
           [j.cubeToJoin]: {
@@ -141,8 +142,20 @@ export abstract class BaseSchemaFormatter {
               j.thisTableColumn
             )} = ${this.cubeReference(j.cubeToJoin)}.${this.escapeName(j.columnToJoin)}`,
             relationship: this.options.snakeCase
-              ? JOIN_RELATIONSHIP_MAP[j.relationship]
+              ? (JOIN_RELATIONSHIP_MAP[j.relationship] ?? j.relationship)
               : j.relationship,
+          },
+        }))
+        .reduce((a, b) => ({ ...a, ...b }), {}),
+      dimensions: tableSchema.dimensions.sort((a) => (a.isPrimaryKey ? -1 : 0))
+        .map((m) => ({
+          [this.memberName(m)]: {
+            sql: this.sqlForMember(m),
+            type: m.type ?? m.types[0],
+            title: this.memberTitle(m),
+            [this.options.snakeCase ? 'primary_key' : 'primaryKey']: m.isPrimaryKey
+              ? true
+              : undefined,
           },
         }))
         .reduce((a, b) => ({ ...a, ...b }), {}),
@@ -159,23 +172,20 @@ export abstract class BaseSchemaFormatter {
             type: 'count',
           },
         }),
-      dimensions: tableSchema.dimensions
-        .map((m) => ({
-          [this.memberName(m)]: {
-            sql: this.sqlForMember(m),
-            type: m.type ?? m.types[0],
-            title: this.memberTitle(m),
-            [this.options.snakeCase ? 'primary_key' : 'primaryKey']: m.isPrimaryKey
-              ? true
-              : undefined,
-          },
-        }))
-        .reduce((a, b) => ({ ...a, ...b }), {}),
+
       ...(this.options.snakeCase
         ? Object.fromEntries(
           Object.entries(contextProps).map(([key, value]) => [toSnakeCase(key), value])
         )
         : contextProps),
+
+      [this.options.snakeCase ? 'pre_aggregations' : 'preAggregations']: new ValueWithComments(
+        null,
+        [
+          'Pre-aggregation definitions go here.',
+          'Learn more in the documentation: https://cube.dev/docs/caching/pre-aggregations/getting-started',
+        ]
+      ),
     };
   }
 

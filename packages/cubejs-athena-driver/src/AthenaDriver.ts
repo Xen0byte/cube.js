@@ -17,8 +17,6 @@ import {
   ColumnInfo,
   StartQueryExecutionCommandInput,
 } from '@aws-sdk/client-athena';
-import { S3, GetObjectCommand } from '@aws-sdk/client-s3';
-import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import * as stream from 'stream';
 import {
   BaseDriver,
@@ -132,13 +130,10 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
       getEnv('dbSchema', { dataSource });
 
     this.config = {
-      readOnly: true,
-
-      ...restConfig,
-
       credentials: accessKeyId && secretAccessKey
         ? { accessKeyId, secretAccessKey }
         : undefined,
+      ...restConfig,
       region:
         config.region ||
         getEnv('athenaAwsRegion', { dataSource }),
@@ -172,6 +167,11 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
         AthenaDriver.normalizeS3Path(this.config.exportBucket);
     }
 
+    if (typeof this.config.readOnly === 'undefined') {
+      // If Export bucket configuration is in place we want to always use it instead of batching
+      this.config.readOnly = !this.isUnloadSupported();
+    }
+
     this.athena = new Athena(this.config);
   }
 
@@ -186,7 +186,10 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
    * Returns driver's capabilities object.
    */
   public capabilities(): DriverCapabilities {
-    return { unloadWithoutTempTable: true };
+    return {
+      unloadWithoutTempTable: true,
+      incrementalSchemaLoading: true,
+    };
   }
 
   /**
@@ -356,7 +359,7 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
       throw new Error('Export bucket is not configured.');
     }
     const types = options.query
-      ? await this.unloadWithSql(tableName, options.query.sql)
+      ? await this.unloadWithSql(tableName, options)
       : await this.unloadWithTable(tableName);
     const csvFile = await this.getCsvFiles(tableName);
     return {
@@ -364,6 +367,7 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
       csvFile,
       types,
       csvNoHeader: true,
+      csvDelimiter: '^A',
     };
   }
 
@@ -372,18 +376,17 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
    */
   private async unloadWithSql(
     tableName: string,
-    sql: string,
+    unloadOptions: UnloadOptions,
   ): Promise<TableStructure> {
-    const columns = await this.queryColumnTypes(sql);
+    const columns = await this.queryColumnTypes(unloadOptions.query!.sql, unloadOptions.query!.params);
     const unloadSql = `
-      UNLOAD (${sql})
+      UNLOAD (${unloadOptions.query!.sql})
       TO '${this.config.exportBucket}/${tableName}'
       WITH (
         format = 'TEXTFILE',
-        field_delimiter = ',',
         compression='GZIP'
       )`;
-    const qid = await this.startQuery(unloadSql, []);
+    const qid = await this.startQuery(unloadSql, unloadOptions.query!.params);
     await this.waitForSuccess(qid);
     await this.athena.getQueryResults(qid);
     return columns;
@@ -400,7 +403,6 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
       TO '${this.config.exportBucket}/${tableName}'
       WITH (
         format = 'TEXTFILE',
-        field_delimiter = ',',
         compression='GZIP'
       )`;
     const qid = await this.startQuery(unloadSql, []);
@@ -411,9 +413,9 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
   /**
    * Returns an array of queried fields meta info.
    */
-  public async queryColumnTypes(sql: string): Promise<TableStructure> {
+  public async queryColumnTypes(sql: string, params?: unknown[]): Promise<TableStructure> {
     const unloadSql = `${sql} LIMIT 0`;
-    const qid = await this.startQuery(unloadSql, []);
+    const qid = await this.startQuery(unloadSql, params || []);
     await this.waitForSuccess(qid);
     const results = await this.athena.getQueryResults(qid);
     const columns = this.mapTypes(
@@ -427,78 +429,25 @@ export class AthenaDriver extends BaseDriver implements DriverInterface {
    * fields meta info.
    */
   public mapTypes(fields: ColumnInfo[]): TableStructure {
-    return fields.map((field) => {
-      let type;
-      switch (field.Type) {
-        case 'boolean':
-          type = 'boolean';
-          break;
-        // integers
-        case 'tinyint':
-        case 'smallint':
-        case 'int':
-        case 'integer':
-        case 'bigint':
-          type = 'int';
-          break;
-        // float
-        case 'float':
-          type = 'float';
-          break;
-        // double
-        case 'double':
-          type = 'double';
-          break;
-        // strings
-        case 'char':
-        case 'varchar':
-        case 'string':
-        case 'binary':
-          type = 'text';
-          break;
-        // date and time
-        case 'date':
-        case 'timestamp':
-          type = 'date';
-          break;
-        // unknown
-        default:
-          type = 'text';
-          break;
-      }
-      return { name: <string>field.Name, type };
-    });
+    return fields.map((field) => ({ name: <string>field.Name, type: this.toGenericType(field.Type || 'text') }));
   }
 
   /**
    * Returns an array of signed URLs of the unloaded csv files.
    */
   private async getCsvFiles(tableName: string): Promise<string[]> {
-    const client = new S3({
-      credentials: this.config.credentials,
-      region: this.config.region,
-    });
     const { bucket, prefix } = AthenaDriver.splitS3Path(
       `${this.config.exportBucket}/${tableName}`
     );
-    const list = await client.listObjectsV2({
-      Bucket: bucket,
-      Prefix: prefix.slice(1), // skip leading
-    });
-    if (!list.Contents) {
-      return [];
-    } else {
-      const files = await Promise.all(
-        list.Contents.map(async (file) => {
-          const command = new GetObjectCommand({
-            Bucket: bucket,
-            Key: file.Key,
-          });
-          return getSignedUrl(client, command, { expiresIn: 3600 });
-        })
-      );
-      return files;
-    }
+
+    return this.extractUnloadedFilesFromS3(
+      {
+        credentials: this.config.credentials,
+        region: this.config.region,
+      },
+      bucket,
+      prefix.slice(1),
+    );
   }
 
   public informationSchemaQuery() {

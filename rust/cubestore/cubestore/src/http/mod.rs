@@ -146,6 +146,10 @@ impl HttpServer {
                                 if let Err(e) = send_res {
                                     error!("Websocket message send error: {:?}", e)
                                 }
+                                if res.should_close_connection() {
+                                   log::warn!("Websocket connection closed");
+                                   break;
+                                }
                             }
                             Some(msg) = web_socket.next() => {
                                 match msg {
@@ -284,12 +288,21 @@ impl HttpServer {
                                 "Error processing HTTP command: {}\n",
                                 e.display_with_backtrace()
                             );
+                                let command = if e.is_wrong_connection() {
+                                    HttpCommand::CloseConnection {
+                                        error: e.to_string(),
+                                    }
+
+                                } else {
+                                    HttpCommand::Error {
+                                        error: e.to_string(),
+                                    }
+                                };
+
                                 HttpMessage {
                                     message_id,
                                     connection_id,
-                                    command: HttpCommand::Error {
-                                        error: e.to_string(),
-                                    },
+                                    command,
                                 }
                             }
                         });
@@ -576,6 +589,9 @@ pub enum HttpCommand {
     ResultSet {
         data_frame: Arc<DataFrame>,
     },
+    CloseConnection {
+        error: String,
+    },
     Error {
         error: String,
     },
@@ -589,7 +605,9 @@ impl HttpMessage {
             command_type: match self.command {
                 HttpCommand::Query { .. } => crate::codegen::HttpCommand::HttpQuery,
                 HttpCommand::ResultSet { .. } => crate::codegen::HttpCommand::HttpResultSet,
-                HttpCommand::Error { .. } => crate::codegen::HttpCommand::HttpError,
+                HttpCommand::CloseConnection { .. } | HttpCommand::Error { .. } => {
+                    crate::codegen::HttpCommand::HttpError
+                }
             },
             command: match &self.command {
                 HttpCommand::Query {
@@ -614,7 +632,7 @@ impl HttpMessage {
                         .as_union_value(),
                     )
                 }
-                HttpCommand::Error { error } => {
+                HttpCommand::Error { error } | HttpCommand::CloseConnection { error } => {
                     let error_offset = builder.create_string(&error);
                     Some(
                         HttpError::create(
@@ -653,6 +671,10 @@ impl HttpMessage {
         builder.finished_data().to_vec() // TODO copy
     }
 
+    pub fn should_close_connection(&self) -> bool {
+        matches!(self.command, HttpCommand::CloseConnection { .. })
+    }
+
     fn build_columns<'a: 'ma, 'ma>(
         builder: &'ma mut FlatBufferBuilder<'a>,
         columns: &Vec<Column>,
@@ -688,7 +710,17 @@ impl HttpMessage {
                         let string_value = Some(builder.create_string(&v.to_string()));
                         HttpColumnValue::create(builder, &HttpColumnValueArgs { string_value })
                     }
+                    TableValue::Int96(v) => {
+                        let string_value = Some(builder.create_string(&v.to_string()));
+                        HttpColumnValue::create(builder, &HttpColumnValueArgs { string_value })
+                    }
                     TableValue::Decimal(v) => {
+                        let scale =
+                            u8::try_from(columns[i].get_column_type().target_scale()).unwrap();
+                        let string_value = Some(builder.create_string(&v.to_string(scale)));
+                        HttpColumnValue::create(builder, &HttpColumnValueArgs { string_value })
+                    }
+                    TableValue::Decimal96(v) => {
                         let scale =
                             u8::try_from(columns[i].get_column_type().target_scale()).unwrap();
                         let string_value = Some(builder.create_string(&v.to_string(scale)));
@@ -839,6 +871,7 @@ mod tests {
     use flatbuffers::{FlatBufferBuilder, ForwardsUOffset, Vector, WIPOffset};
     use futures_util::{SinkExt, StreamExt};
     use indoc::indoc;
+    use log::trace;
     use std::path::Path;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
@@ -981,14 +1014,20 @@ mod tests {
         async fn exec_query_with_context(
             &self,
             _context: SqlQueryContext,
-            _query: &str,
+            query: &str,
         ) -> Result<Arc<DataFrame>, CubeError> {
             tokio::time::sleep(Duration::from_secs(2)).await;
             let counter = self.message_counter.fetch_add(1, Ordering::Relaxed);
-            Ok(Arc::new(DataFrame::new(
-                vec![Column::new("foo".to_string(), ColumnType::String, 0)],
-                vec![Row::new(vec![TableValue::String(format!("{}", counter))])],
-            )))
+            if query == "close_connection" {
+                Err(CubeError::wrong_connection("wrong connection".to_string()))
+            } else if query == "error" {
+                Err(CubeError::internal("error".to_string()))
+            } else {
+                Ok(Arc::new(DataFrame::new(
+                    vec![Column::new("foo".to_string(), ColumnType::String, 0)],
+                    vec![Row::new(vec![TableValue::String(format!("{}", counter))])],
+                )))
+            }
         }
 
         async fn plan_query(&self, _query: &str) -> Result<QueryPlans, CubeError> {
@@ -1046,19 +1085,25 @@ mod tests {
 
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        async fn connect_and_send(
-            message_id: u32,
-            connection_id: Option<String>,
-        ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
-            let (mut socket, _) = connect_async(Url::parse("ws://127.0.0.1:53031/ws").unwrap())
+        async fn connect() -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+            let (socket, _) = connect_async(Url::parse("ws://127.0.0.1:53031/ws").unwrap())
                 .await
                 .unwrap();
+            socket
+        }
+
+        async fn send_query(
+            socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+            message_id: u32,
+            connection_id: Option<String>,
+            query: &str,
+        ) {
             socket
                 .send(Message::binary(
                     HttpMessage {
                         message_id,
                         command: HttpCommand::Query {
-                            query: "foo".to_string(),
+                            query: query.to_string(),
                             inline_tables: vec![],
                             trace_obj: None,
                         },
@@ -1068,7 +1113,23 @@ mod tests {
                 ))
                 .await
                 .unwrap();
+        }
+
+        async fn connect_and_send_query(
+            message_id: u32,
+            connection_id: Option<String>,
+            query: &str,
+        ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+            let mut socket = connect().await;
+            send_query(&mut socket, message_id, connection_id, query).await;
             socket
+        }
+
+        async fn connect_and_send(
+            message_id: u32,
+            connection_id: Option<String>,
+        ) -> WebSocketStream<MaybeTlsStream<TcpStream>> {
+            connect_and_send_query(message_id, connection_id, "foo").await
         }
 
         async fn assert_message(
@@ -1088,6 +1149,7 @@ mod tests {
                     .next()
                     .unwrap()
                 {
+                    trace!("Message: {}", v.as_str());
                     assert_eq!(v.as_str(), counter);
                 } else {
                     panic!("String expected");
@@ -1113,6 +1175,7 @@ mod tests {
             // Orphaned complete message
             async move {
                 // takes message 1
+                tokio::time::sleep(Duration::from_millis(300)).await;
                 let mut socket = connect_and_send(1, Some("bar".to_string())).await;
                 socket.close(None).await.unwrap();
             },
@@ -1149,6 +1212,25 @@ mod tests {
                 socket.close(None).await.unwrap();
             },
         );
+
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let mut socket = connect_and_send(3, Some("foo".to_string())).await;
+        assert_message(&mut socket, "6").await;
+
+        let mut socket2 = connect_and_send(3, Some("foo2".to_string())).await;
+        assert_message(&mut socket2, "7").await;
+
+        send_query(&mut socket, 3, Some("foo".to_string()), "close_connection").await;
+        socket.next().await.unwrap().unwrap();
+
+        send_query(&mut socket2, 3, Some("foo".to_string()), "error").await;
+        socket2.next().await.unwrap().unwrap();
+
+        send_query(&mut socket, 3, Some("foo".to_string()), "foo").await;
+        assert!(socket.next().await.unwrap().is_err());
+
+        let mut socket2 = connect_and_send(3, Some("foo2".to_string())).await;
+        assert_message(&mut socket2, "10").await;
 
         http_server.stop_processing().await;
     }

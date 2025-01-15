@@ -1,7 +1,10 @@
 /* eslint-disable camelcase */
-import { Cast } from 'src/dataset';
+import { Cast } from './Cast';
 
 export type Fixture = {
+  extendedEnvs: {
+    [key: string]: any
+  },
   cube: {
     environment: {
       [key: string]: string,
@@ -22,14 +25,10 @@ export type Fixture = {
   },
   cast: Cast,
   tables: {
-    products: string,
-    customers: string,
-    ecommerce: string,
+    [table: string]: string,
   },
   preAggregations?: {
-    Products: [{ name: string, [prop: string]: unknown }],
-    Customers: [{ name: string, [prop: string]: unknown }],
-    ECommerce: [{ name: string, [prop: string]: unknown }],
+    [cube: string]: [{ name: string, [prop: string]: unknown }],
   },
   skip?: string[],
 };

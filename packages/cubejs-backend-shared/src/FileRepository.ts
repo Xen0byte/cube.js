@@ -26,7 +26,9 @@ export class FileRepository implements SchemaFileRepository {
     let files: string[] = [];
     
     try {
-      files = await fs.readdir(path.join(this.localPath(), dir));
+      const fullPath = path.join(this.localPath(), dir);
+      await fs.ensureDir(fullPath);
+      files = await fs.readdir(fullPath);
     } catch (e) {
       throw new Error(`Model files not found. Please make sure the "${this.repositoryPath}" directory exists and contains model files.`);
     }
@@ -47,7 +49,7 @@ export class FileRepository implements SchemaFileRepository {
 
     let result = await Promise.all(
       files
-        .filter(file => file.endsWith('.js') || file.endsWith('.yml') || file.endsWith('.yaml'))
+        .filter(file => file.endsWith('.js') || file.endsWith('.yml') || file.endsWith('.yaml') || file.endsWith('.jinja') || file.endsWith('.py'))
         .map(async file => {
           const content = await fs.readFile(path.join(this.localPath(), file), 'utf-8');
 

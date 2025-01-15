@@ -1,16 +1,19 @@
 use datafusion::{arrow::datatypes::DataType, logical_plan::Column};
-use std::ops::RangeFrom;
+use itertools::Itertools;
+use std::{collections::HashMap, ops::RangeFrom, sync::Arc};
+use uuid::Uuid;
 
-use cubeclient::models::{V1CubeMeta, V1CubeMetaDimension, V1CubeMetaMeasure};
+use crate::{sql::ColumnType, transport::SqlGenerator};
 
-use crate::sql::ColumnType;
-
-use super::V1CubeMetaExt;
+use super::{CubeMeta, CubeMetaDimension, CubeMetaMeasure, V1CubeMetaExt};
 
 #[derive(Debug)]
 pub struct MetaContext {
-    pub cubes: Vec<V1CubeMeta>,
+    pub cubes: Vec<CubeMeta>,
     pub tables: Vec<CubeMetaTable>,
+    pub cube_to_data_source: HashMap<String, String>,
+    pub data_source_to_sql_generator: HashMap<String, Arc<dyn SqlGenerator + Send + Sync>>,
+    pub compiler_id: Uuid,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +22,7 @@ pub struct CubeMetaTable {
     pub record_oid: u32,
     pub array_handler_oid: u32,
     pub name: String,
+    pub description: Option<String>,
     pub columns: Vec<CubeMetaColumn>,
 }
 
@@ -26,12 +30,18 @@ pub struct CubeMetaTable {
 pub struct CubeMetaColumn {
     pub oid: u32,
     pub name: String,
+    pub description: Option<String>,
     pub column_type: ColumnType,
     pub can_be_null: bool,
 }
 
 impl MetaContext {
-    pub fn new(cubes: Vec<V1CubeMeta>) -> Self {
+    pub fn new(
+        cubes: Vec<CubeMeta>,
+        cube_to_data_source: HashMap<String, String>,
+        data_source_to_sql_generator: HashMap<String, Arc<dyn SqlGenerator + Send + Sync>>,
+        compiler_id: Uuid,
+    ) -> Self {
         // 18000 - max system table oid
         let mut oid_iter: RangeFrom<u32> = 18000..;
         let tables: Vec<CubeMetaTable> = cubes
@@ -41,12 +51,14 @@ impl MetaContext {
                 record_oid: oid_iter.next().unwrap_or(0),
                 array_handler_oid: oid_iter.next().unwrap_or(0),
                 name: cube.name.clone(),
+                description: cube.description.clone(),
                 columns: cube
                     .get_columns()
                     .iter()
                     .map(|column| CubeMetaColumn {
                         oid: oid_iter.next().unwrap_or(0),
                         name: column.get_name().clone(),
+                        description: column.get_description().clone(),
                         column_type: column.get_column_type().clone(),
                         can_be_null: column.sql_can_be_null(),
                     })
@@ -54,10 +66,33 @@ impl MetaContext {
             })
             .collect();
 
-        Self { cubes, tables }
+        Self {
+            cubes,
+            tables,
+            cube_to_data_source,
+            data_source_to_sql_generator,
+            compiler_id,
+        }
     }
 
-    pub fn find_cube_with_name(&self, name: &str) -> Option<V1CubeMeta> {
+    pub fn sql_generator_by_alias_to_cube(
+        &self,
+        alias_to_cube: &Vec<(String, String)>,
+    ) -> Option<Arc<dyn SqlGenerator + Send + Sync>> {
+        let data_sources = alias_to_cube
+            .iter()
+            .map(|(_, c)| self.cube_to_data_source.get(c))
+            .unique()
+            .collect::<Option<Vec<_>>>()?;
+        if data_sources.len() != 1 {
+            return None;
+        }
+        self.data_source_to_sql_generator
+            .get(data_sources[0].as_str())
+            .cloned()
+    }
+
+    pub fn find_cube_with_name(&self, name: &str) -> Option<CubeMeta> {
         for cube in self.cubes.iter() {
             if cube.name.eq(&name) {
                 return Some(cube.clone());
@@ -71,7 +106,7 @@ impl MetaContext {
         &self,
         alias_to_cube: &Vec<(String, String)>,
         column: &Column,
-    ) -> Option<(String, V1CubeMeta)> {
+    ) -> Option<(String, CubeMeta)> {
         (if let Some(rel) = column.relation.as_ref() {
             alias_to_cube.iter().find(|(a, _)| a == rel)
         } else {
@@ -93,7 +128,7 @@ impl MetaContext {
         &self,
         alias_to_cube: &Vec<((String, String), String)>,
         column: &Column,
-    ) -> Vec<((String, String), V1CubeMeta)> {
+    ) -> Vec<((String, String), CubeMeta)> {
         if let Some(rel) = column.relation.as_ref() {
             alias_to_cube
                 .iter()
@@ -122,7 +157,7 @@ impl MetaContext {
         }
     }
 
-    pub fn find_measure_with_name(&self, name: String) -> Option<V1CubeMetaMeasure> {
+    pub fn find_measure_with_name(&self, name: String) -> Option<CubeMetaMeasure> {
         let cube_and_member_name = name.split(".").collect::<Vec<_>>();
         if let Some(cube) = self.find_cube_with_name(cube_and_member_name[0]) {
             cube.lookup_measure(cube_and_member_name[1]).cloned()
@@ -131,13 +166,31 @@ impl MetaContext {
         }
     }
 
-    pub fn find_dimension_with_name(&self, name: String) -> Option<V1CubeMetaDimension> {
+    pub fn find_dimension_with_name(&self, name: String) -> Option<CubeMetaDimension> {
         let cube_and_member_name = name.split(".").collect::<Vec<_>>();
         if let Some(cube) = self.find_cube_with_name(cube_and_member_name[0]) {
             cube.lookup_dimension(cube_and_member_name[1]).cloned()
         } else {
             None
         }
+    }
+
+    pub fn is_synthetic_field(&self, name: String) -> bool {
+        let cube_and_member_name = name.split(".").collect::<Vec<_>>();
+        if cube_and_member_name.len() == 1
+            && MetaContext::is_synthetic_field_name(cube_and_member_name[0])
+        {
+            return true;
+        }
+        if let Some(_) = self.find_cube_with_name(cube_and_member_name[0]) {
+            MetaContext::is_synthetic_field_name(cube_and_member_name[1])
+        } else {
+            false
+        }
+    }
+
+    pub fn is_synthetic_field_name(field_name: &str) -> bool {
+        field_name == "__user" || field_name == "__cubeJoinField"
     }
 
     pub fn find_df_data_type(&self, member_name: String) -> Option<DataType> {
@@ -167,29 +220,40 @@ impl MetaContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::CubeMetaType;
 
     #[test]
     fn test_find_tables() {
         let test_cubes = vec![
-            V1CubeMeta {
+            CubeMeta {
                 name: "test1".to_string(),
+                description: None,
                 title: None,
+                r#type: CubeMetaType::Cube,
                 dimensions: vec![],
                 measures: vec![],
                 segments: vec![],
                 joins: None,
+                folders: None,
+                meta: None,
             },
-            V1CubeMeta {
+            CubeMeta {
                 name: "test2".to_string(),
+                description: None,
                 title: None,
+                r#type: CubeMetaType::Cube,
                 dimensions: vec![],
                 measures: vec![],
                 segments: vec![],
                 joins: None,
+                folders: None,
+                meta: None,
             },
         ];
 
-        let test_context = MetaContext::new(test_cubes);
+        // TODO
+        let test_context =
+            MetaContext::new(test_cubes, HashMap::new(), HashMap::new(), Uuid::new_v4());
 
         match test_context.find_cube_table_with_oid(18000) {
             Some(table) => assert_eq!(18000, table.oid),
